@@ -152,7 +152,7 @@ El Excel contiene las siguientes hojas:
 | **CONTANET** | Verde oscuro | Todos los registros contables |
 | **Tab_Banco** | Azul medio | Tabla simplificada del banco (para cruce) |
 | **Tab_Contanet** | Verde medio | Tabla simplificada de contabilidad (para cruce) |
-| **Anexar1** | Morado | ⭐ Hoja de trabajo del especialista — banco y conta apilados |
+| **Anexar1** | Morado | Hoja de trabajo del especialista — banco y conta apilados |
 | **Resumen** | Naranja | Totales por tipo/código con diferencias |
 
 ---

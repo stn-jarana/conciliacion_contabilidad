@@ -71,25 +71,58 @@ def generar_reporte_final(
     else:
         anexar1['MAR'] = ''
 
-    # ── Separar filas banco y filas conta ────────────────────────────
-    # Filas banco: tienen Monto-Banco y NO tienen # Registro
-    mask_banco = anexar1['Monto-Banco'].notna()
-    mask_conta = anexar1['Monto-Conta'].notna()
+    # ── Aprobar sugerencias 1-a-1 marcadas por el especialista ───────────
+    # Si el especialista puso algo en la columna 'Conciliar' para una fila
+    # con anotación 'Sugerido:' y que tiene AMBOS montos (banco y conta en
+    if 'Conciliar' in anexar1.columns and 'Anotación' in anexar1.columns:
+        mask_sugerido_1a1 = (
+            anexar1['Anotación'].astype(str).str.contains('Sugerido:', na=False)
+            & anexar1['Conciliar'].apply(lambda v: pd.notna(v) and str(v).strip() not in ('', 'nan'))
+            & anexar1['Monto-Banco'].notna()
+            & anexar1['Monto-Conta'].notna()
+        )
+        if mask_sugerido_1a1.any():
+            anexar1.loc[mask_sugerido_1a1, 'MAR'] = 'X'
+            # Copiar # Operación del banco al campo # Operación2 (usado para el cruce)
+            if 'Banco - # Operación' in anexar1.columns and '# Operación2' in anexar1.columns:
+                op_banco = anexar1.loc[mask_sugerido_1a1, 'Banco - # Operación'].apply(
+                    lambda v: str(v) if pd.notna(v) and str(v) not in ('nan', '') else pd.NA
+                )
+                anexar1.loc[mask_sugerido_1a1, '# Operación2'] = op_banco
 
-    df_banco = anexar1[mask_banco].copy()
-    df_conta = anexar1[mask_conta].copy()
 
-    # ── Clasificar según MAR ──────────────────────────────────────────
+    # ── Identificar filas 1-a-1 aprobadas (tienen ambos montos en la misma fila)
+    mask_combinadas_aprobadas = (
+        (anexar1['MAR'] == 'X')
+        & anexar1['Monto-Banco'].notna()
+        & anexar1['Monto-Conta'].notna()
+    )
+    df_combinadas = anexar1[mask_combinadas_aprobadas].copy()
+    # Excluir esas filas del flujo normal (ya están conciliadas directamente)
+    anexar1_normal = anexar1[~mask_combinadas_aprobadas].copy()
+
+    # ── Separar filas banco y filas conta (solo las no-combinadas) ────────
+    mask_banco = anexar1_normal['Monto-Banco'].notna()
+    mask_conta = anexar1_normal['Monto-Conta'].notna()
+
+    df_banco = anexar1_normal[mask_banco].copy()
+    df_conta = anexar1_normal[mask_conta].copy()
+
+    # ── Clasificar según MAR ────────────────────────────────────
     # El especialista pone 'X' en MAR para marcar filas vinculadas
     banco_marcado    = df_banco[df_banco['MAR'] == 'X'].copy()
     banco_sin_marcar = df_banco[df_banco['MAR'] != 'X'].copy()
     conta_marcado    = df_conta[df_conta['MAR'] == 'X'].copy()
     conta_sin_marcar = df_conta[df_conta['MAR'] != 'X'].copy()
 
-    # ── Construir tabla de conciliados ────────────────────────────────
-    conciliados = _cruzar_marcados(banco_marcado, conta_marcado)
+    # ── Construir tabla de conciliados ──────────────────────────────
+    # a) Pares del especialista en filas separadas
+    conciliados_manual = _cruzar_marcados(banco_marcado, conta_marcado)
+    # b) Sugerencias 1-a-1 aprobadas directamente (filas combinadas)
+    conciliados_1a1 = _conciliados_de_combinadas(df_combinadas)
+    conciliados = pd.concat([conciliados_manual, conciliados_1a1], ignore_index=True)
 
-    # ── Solo banco y solo conta ───────────────────────────────────────
+    # ── Solo banco y solo conta ──────────────────────────────────
     solo_banco = banco_sin_marcar[[
         'Fecha', 'Banco - Descripción', 'Monto-Banco', 'Banco - # Operación', 'TIPO', 'CODIGO', 'Anotación'
     ]].copy() if not banco_sin_marcar.empty else pd.DataFrame()
@@ -185,7 +218,35 @@ def _cruzar_marcados(
     return pd.DataFrame(filas) if filas else pd.DataFrame()
 
 
+def _conciliados_de_combinadas(df_combinadas: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convierte filas combinadas (1-a-1 aprobadas por el especialista en la
+    columna 'Conciliar') en registros de la tabla de conciliados.
+    Cada fila ya contiene tanto los datos del banco como de conta.
+    """
+    if df_combinadas.empty:
+        return pd.DataFrame()
+    filas = []
+    for _, row in df_combinadas.iterrows():
+        anotacion = str(row.get('Anotación', '')).strip() if pd.notna(row.get('Anotación')) else ''
+        filas.append({
+            'Fecha Banco'       : row.get('Fecha'),
+            'Descripcion Banco' : row.get('Banco - Descripción', ''),
+            'Monto-Banco'       : row.get('Monto-Banco'),
+            '# Op. Banco'       : row.get('Banco - # Operación', ''),
+            'Fecha Conta'       : row.get('Fecha'),
+            '# Registro'        : row.get('Conta - # Registro', ''),
+            'Monto-Conta'       : row.get('Monto-Conta'),
+            'DIF COMISON'       : row.get('DIF COMISON', 0),
+            'TIPO'              : row.get('TIPO', ''),
+            'Diferencia'        : (row.get('Monto-Banco', 0) or 0) - (row.get('Monto-Conta', 0) or 0),
+            'Anotación'         : anotacion,
+        })
+    return pd.DataFrame(filas)
+
+
 def _fila_conciliada(rb: pd.Series, rc: pd.Series) -> dict:
+
     """Construye una fila del resultado de conciliados."""
     anot_b = str(rb.get('Anotación', '')).strip() if pd.notna(rb.get('Anotación')) else ''
     anot_c = str(rc.get('Anotación', '')).strip() if pd.notna(rc.get('Anotación')) else ''

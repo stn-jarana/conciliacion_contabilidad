@@ -97,6 +97,8 @@ def _exportar_banco(bank: pd.DataFrame) -> pd.DataFrame:
     df['SUB']           = 0
     df['TIPO']          = df['Monto-Banco'].apply(lambda x: 'INGRESO' if x > 0 else 'EGRESO')
     df['CODIGO']        = df['Monto-Banco']
+    # Preserve leading zeros by treating operation numbers as strings
+    df['# Operación'] = df['# Operación'].astype(str)
     df['# Operación2']  = df['# Operación']
     return df
 
@@ -129,6 +131,8 @@ def _preparar_tab_banco(bank: pd.DataFrame) -> pd.DataFrame:
     df['MAR']          = ''
     df['TIPO']         = df['Monto-Banco'].apply(lambda x: 'INGRESO' if x > 0 else 'EGRESO')
     df['CODIGO']       = df['Monto-Banco']
+    # Ensure operation numbers keep leading zeros
+    df['Banco - # Operación'] = df['Banco - # Operación'].astype(str)
     df['# Operación2'] = df['Banco - # Operación']
     return df
 
@@ -375,6 +379,19 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame) -> pd.Da
 
     banco_ext = tab_banco.copy()
     conta_ext = tab_conta.copy()
+    # Remove placeholder rows that contain header texts like 'Información anterior' or column names
+    def _clean_df(df):
+        # Drop rows where any cell equals its column header or the phrase 'Información anterior'
+        mask = df.apply(lambda row: any(str(v).strip() == col or str(v).strip() == 'Información anterior'
+                                 for col, v in zip(df.columns, row)), axis=1)
+        return df[~mask]
+    banco_ext = _clean_df(banco_ext)
+    conta_ext = _clean_df(conta_ext)
+    # Mark ITF rows as reconciled and set operation number to 00000000
+    itf_mask = banco_ext['Banco - Descripción'].astype(str).str.upper().str.contains('ITF')
+    banco_ext.loc[itf_mask, 'MAR'] = 'X'
+    banco_ext.loc[itf_mask, 'Banco - # Operación'] = '00000000'
+    banco_ext.loc[itf_mask, '# Operación2'] = '00000000'
     
     if 'Anotación' not in banco_ext.columns: banco_ext['Anotación'] = ''
     if 'Anotación' not in conta_ext.columns: conta_ext['Anotación'] = ''
@@ -442,31 +459,92 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame) -> pd.Da
 
     df_matched = pd.DataFrame(matched_rows, columns=cols) if matched_rows else pd.DataFrame(columns=cols)
 
+    # ---- Sugerencias 1 a 1 (sin MAR) ----
+    suggestion_rows = []
+    used_groups = []  # grupos que se combinarán y deben eliminarse de los DataFrames individuales
+    sug_groups = pd.unique(pd.concat([b_unmatch['# Operación2'], c_unmatch['# Operación2']]))
+    for g in sug_groups:
+        if pd.isna(g) or str(g).strip() == '':
+            continue
+        bg = b_unmatch[b_unmatch['# Operación2'] == g].reset_index(drop=True)
+        cg = c_unmatch[c_unmatch['# Operación2'] == g].reset_index(drop=True)
+        # Solo considerar si ambos tienen anotación de sugerencia
+        if not bg['Anotación'].astype(str).str.contains('Sugerido:').any() or not cg['Anotación'].astype(str).str.contains('Sugerido:').any():
+            continue
+        # Determinar si es 1 a 1 o 1 a many
+        if len(bg) == 1 and len(cg) == 1:
+            # Combinar la única fila de cada lado
+            row = {}
+            for col in cols:
+                val_b = bg.at[0, col]
+                val_c = cg.at[0, col]
+                if pd.notna(val_b) and str(val_b) not in ('nan', ''):
+                    row[col] = val_b
+                elif pd.notna(val_c) and str(val_c) not in ('nan', ''):
+                    row[col] = val_c
+                else:
+                    row[col] = None
+            # No copiar número de operación en filas sugeridas; se completará tras conciliación automática o decisión del especialista
+            suggestion_rows.append(row)
+            used_groups.append(g)
+        else:
+            # Caso 1 a many o many a 1: no combinar, se mantendrán filas separadas
+            continue
+
+    df_suggest = pd.DataFrame(suggestion_rows, columns=cols) if suggestion_rows else pd.DataFrame(columns=cols)
+
+    # Eliminar filas individuales que ya fueron combinadas
+    b_unmatch_filtered = b_unmatch[~b_unmatch['# Operación2'].isin(used_groups)]
+    c_unmatch_filtered = c_unmatch[~c_unmatch['# Operación2'].isin(used_groups)]
+
+    # Concatenar todo
     anexar = pd.concat(
-        [df_matched, b_unmatch[cols], c_unmatch[cols]],
+        [df_matched, df_suggest, b_unmatch_filtered[cols], c_unmatch_filtered[cols]],
         ignore_index=True
     )
 
-    # Crear una clave de ordenamiento para subir los conciliados arriba pero MANTENER LOS PARES JUNTOS
-    def _is_matched(row):
-        if row.get('MAR') == 'X': return 0
-        if 'Sugerido:' in str(row.get('Anotación', '')): return 0.5
-        if 'ITF' in str(row.get('Banco - Descripción', '')).upper(): return 2
-        val = row.get('Conta - ¿Conciliado?')
-        if pd.notna(val):
-            s = str(val).strip().upper()
-            if s in ['SI', 'S', 'X', 'TRUE', '1', 'YES', 'Y', 'VERDADERO']: return 0
-        return 1
+    # Columnas para decisión del especialista
+    anexar['Conciliar'] = ''
+    anexar['No Conciliar'] = ''
 
-    anexar['_orden_conciliado'] = anexar.apply(_is_matched, axis=1)
-    
+    # Crear una clave de ordenamiento:
+    # 0 = Conciliados (MAR == 'X')
+    # 1 = Faltan conciliar pero tienen sugerencia ('Sugerido:' en Anotación)
+    # 2 = Solo en banco ('Mov. solo en banco')
+    # 3 = Solo en conta ('Mov. solo en conta')
+    # 4 = ITF (descripción contiene 'ITF')
+    def _orden_grupo(row):
+        # ITF: siempre al final independientemente del MAR
+        if 'ITF' in str(row.get('Banco - Descripción', '')).upper():
+            return 4
+        # Conciliados en ESTE proceso (único indicador válido: MAR == 'X')
+        # NOTA: Conta - ¿Conciliado? indica si estaba conciliado en el sistema
+        # contable ANTES de este proceso, NO indica que esté conciliado aquí.
+        if row.get('MAR') == 'X':
+            return 0
+        anotacion = str(row.get('Anotación', ''))
+        # Sugeridos (faltan conciliar pero tienen sugerencia)
+        if 'Sugerido:' in anotacion:
+            return 1
+        # Solo en banco
+        if 'solo en banco' in anotacion.lower():
+            return 2
+        # Solo en conta
+        if 'solo en conta' in anotacion.lower():
+            return 3
+        # Cualquier otro caso sin clasificar
+        return 2
+
+    anexar['_orden_conciliado'] = anexar.apply(_orden_grupo, axis=1)
+
+    # Para sugeridos: mantener pares juntos usando # Operación2 como sub-clave
     def get_op2_sort(row, ord_c):
-        if ord_c == 0.5:
+        if ord_c == 1:
             return str(row.get('# Operación2', ''))
         return ''
-        
+
     anexar['_op2_sort'] = anexar.apply(lambda r: get_op2_sort(r, r['_orden_conciliado']), axis=1)
-    
+
     anexar = anexar.sort_values(
         by=['_orden_conciliado', '_op2_sort', 'Fecha']
     ).drop(columns=['_orden_conciliado', '_op2_sort']).reset_index(drop=True)
@@ -543,41 +621,88 @@ def _aplicar_formato(ruta: Path) -> None:
         # Altura de cabecera
         ws.row_dimensions[1].height = 30
 
-        # Encontrar índice de la columna MAR y Anotación
+        # Encontrar índice de columnas relevantes
         col_mar_idx = None
         col_anot_idx = None
+        col_conc_idx = None
+        col_no_conc_idx = None
+        col_op2_idx = None
         for i, cell in enumerate(ws[1]):
             val = str(cell.value).strip()
             if val == 'MAR':
                 col_mar_idx = i
             elif val == 'Anotación':
                 col_anot_idx = i
+            elif val == 'Conciliar':
+                col_conc_idx = i
+            elif val == 'No Conciliar':
+                col_no_conc_idx = i
+            elif val == '# Operación2':
+                col_op2_idx = i
+
+        # Detectar índice de columna Banco - Descripción para ITF
+        col_banco_desc_idx = None
+        for i, cell in enumerate(ws[1]):
+            if str(cell.value).strip() == 'Banco - Descripción':
+                col_banco_desc_idx = i
+                break
 
         # Formato de datos
         for row in ws.iter_rows(min_row=2):
             es_rojo = False
             es_sugerido = False
-            
+            es_itf = False
+
             if nombre_hoja == 'Anexar1' and col_mar_idx is not None:
                 val_mar = row[col_mar_idx].value
-                if val_mar != 'X':
-                    es_rojo = True
-                    if col_anot_idx is not None:
-                        if 'Sugerido:' in str(row[col_anot_idx].value or ''):
-                            es_sugerido = True
-                            es_rojo = False
+                # Verificar si es ITF
+                if col_banco_desc_idx is not None:
+                    desc_val = str(row[col_banco_desc_idx].value or '')
+                    if 'ITF' in desc_val.upper():
+                        es_itf = True
+                if not es_itf:
+                    if val_mar != 'X':
+                        es_rojo = True
+                        if col_anot_idx is not None:
+                            if 'Sugerido:' in str(row[col_anot_idx].value or ''):
+                                es_sugerido = True
+                                es_rojo = False
 
             for cell in row:
                 cell.alignment = Alignment(vertical='center')
                 cell.border    = borde
-                if es_rojo:
-                    cell.font = Font(color='FF0000') # Letra roja
+                if es_itf:
+                    cell.font = Font(color='7F7F7F', italic=True)  # Gris itálica para ITF
+                elif es_rojo:
+                    cell.font = Font(color='FF0000')  # Letra roja para no conciliados
                 elif es_sugerido:
-                    cell.font = Font(color='0070C0', bold=True) # Azul negrita para sugeridos
+                    cell.font = Font(color='0070C0', bold=True)  # Azul negrita para sugeridos
                     
                 # Fechas en formato legible
                 if isinstance(cell.value, datetime):
                     cell.number_format = 'DD/MM/YYYY'
+
+        # Combinar celdas Conciliar/No Conciliar para grupos sugeridos 1-a-muchos
+        if (nombre_hoja == 'Anexar1' and col_op2_idx is not None
+                and col_conc_idx is not None and col_no_conc_idx is not None
+                and col_anot_idx is not None):
+            group_rows = {}
+            for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
+                op2_val = row[col_op2_idx].value
+                anot_val = row[col_anot_idx].value
+                if op2_val and isinstance(anot_val, str) and 'Sugerido:' in anot_val:
+                    key = str(op2_val)
+                    group_rows.setdefault(key, []).append(row_idx)
+            for rows in group_rows.values():
+                if len(rows) > 1:
+                    ws.merge_cells(
+                        start_row=rows[0], start_column=col_conc_idx + 1,
+                        end_row=rows[-1],  end_column=col_conc_idx + 1
+                    )
+                    ws.merge_cells(
+                        start_row=rows[0], start_column=col_no_conc_idx + 1,
+                        end_row=rows[-1],  end_column=col_no_conc_idx + 1
+                    )
 
         # Autoajuste de columnas
         for col in ws.columns:
