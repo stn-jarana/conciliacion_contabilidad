@@ -54,7 +54,7 @@ NEGRO        = colors.black
 def generar_pdf_resumen(
     bank: pd.DataFrame,
     conta: pd.DataFrame,
-    anexar1: pd.DataFrame,
+    # anexar1: pd.DataFrame,
     resumen_df: pd.DataFrame,
     ruta_pdf: Path,
     empresa: str = "Southern Textil",

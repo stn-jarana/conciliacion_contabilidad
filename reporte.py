@@ -6,8 +6,6 @@ de la plantilla 'Conciliacion Bancaria Tabla.xlsx':
 
   Hoja BANCO       → datos completos del banco
   Hoja CONTANET    → datos completos de contabilidad
-  Hoja Tab_Banco   → tabla simplificada del banco (para cruce)
-  Hoja Tab_Contanet→ tabla simplificada de contabilidad (para cruce)
   Hoja Anexar1     → ambas tablas apiladas (el especialista trabaja aquí)
   Hoja Resumen     → tabla resumen por TIPO/CODIGO con diferencias
 
@@ -68,18 +66,19 @@ def generar_reporte_inicial(
     print(f"\n  [OK] Reporte inicial generado: {ruta_salida}")
 
     # ── Generar PDF de resumen (mismo nombre, extensión .pdf) ─────────
-    from pdf_resumen import generar_pdf_resumen
-    ruta_pdf = ruta_salida.with_suffix('.pdf')
-    generar_pdf_resumen(
-        bank=bank,
-        conta=conta,
-        anexar1=anexar1,
-        resumen_df=resumen,
-        ruta_pdf=ruta_pdf,
-        empresa=empresa,
-        moneda=moneda,
-        ruta_excel=ruta_salida,
-    )
+    # Generación de PDF deshabilitada.
+    # from pdf_resumen import generar_pdf_resumen
+    # ruta_pdf = ruta_salida.with_suffix('.pdf')
+    # generar_pdf_resumen(
+    #     bank=bank,
+    #     conta=conta,
+    #     anexar1=anexar1,
+    #     resumen_df=resumen,
+    #     ruta_pdf=ruta_pdf,
+    #     empresa=empresa,
+    #     moneda=moneda,
+    #     ruta_excel=ruta_salida,
+    # )
 
     return ruta_salida
 
@@ -126,6 +125,7 @@ def _preparar_tab_banco(bank: pd.DataFrame) -> pd.DataFrame:
     """Tabla completa del banco para el cruce en Anexar1."""
     df = bank[['fecha', 'descripcion', 'monto', 'nro_operacion', 'saldo']].copy()
     df.columns = ['Fecha', 'Banco - Descripción', 'Monto-Banco', 'Banco - # Operación', 'Banco - Saldo']
+    df['Banco - Fecha'] = df['Fecha']
     df['MAR']          = ''
     df['TIPO']         = df['Monto-Banco'].apply(lambda x: 'INGRESO' if x > 0 else 'EGRESO')
     df['CODIGO']       = df['Monto-Banco']
@@ -137,6 +137,7 @@ def _preparar_tab_contanet(conta: pd.DataFrame) -> pd.DataFrame:
     """Tabla completa de contabilidad para el cruce en Anexar1."""
     df = conta[['nro_registro', 'fecha_mov', 'nro_operacion', 'ingreso', 'egreso', 'giro', 'glosa', 'fecha_conciliacion', 'conciliado']].copy()
     df.columns = ['Conta - # Registro', 'Fecha', 'Conta - # Operación', 'Ingreso', 'Egreso', 'Conta - Giro', 'Conta - Glosa', 'Conta - F. Conciliación', 'Conta - ¿Conciliado?']
+    df['Conta - Fecha'] = df['Fecha']
     df['Monto-Conta']  = df['Ingreso'] - df['Egreso']
     df['MAR']          = ''
     df['TIPO']         = df['Monto-Conta'].apply(lambda x: 'INGRESO' if x > 0 else 'EGRESO')
@@ -184,6 +185,32 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame):
             banco_ext.at[b_idx, 'Anotación'] = 'Auto: Código igual'
             conta_ext.at[c_idx, 'Anotación'] = 'Auto: Código igual'
 
+    # 1.5 # Operación de Conta contenido en Descripción de Banco + Monto igual
+    for c_idx, row_c in conta_ext.iterrows():
+        if row_c['_matched']: continue
+        op_c = str(row_c.get('Conta - # Operación', '')).strip()
+        # Evitar falsos positivos requiriendo al menos 4 caracteres en la operación
+        if not op_c or op_c == 'nan' or op_c == '0' or len(op_c) < 4: continue
+        
+        m_c = float(row_c.get('Monto-Conta', 0) or 0)
+        
+        candidates = banco_ext[
+            (~banco_ext['_matched']) & 
+            (abs(banco_ext['Monto-Banco'].fillna(0) - m_c) <= 0.01) &
+            (banco_ext['Banco - Descripción'].astype(str).str.contains(op_c, case=False, na=False, regex=False))
+        ]
+        
+        if len(candidates) == 1:
+            b_idx = candidates.index[0]
+            banco_ext.at[b_idx, '_matched'] = True
+            conta_ext.at[c_idx, '_matched'] = True
+            banco_ext.at[b_idx, 'MAR'] = 'X'
+            conta_ext.at[c_idx, 'MAR'] = 'X'
+            banco_ext.at[b_idx, '# Operación2'] = op_c
+            conta_ext.at[c_idx, '# Operación2'] = op_c
+            banco_ext.at[b_idx, 'Anotación'] = 'Auto: # Operación en Glosa Banco'
+            conta_ext.at[c_idx, 'Anotación'] = 'Auto: # Operación en Glosa Banco'
+
     # 2. Monto + Fecha única
     freq_b = {}
     freq_c = {}
@@ -212,7 +239,11 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame):
             banco_ext.at[b_idx, 'Anotación'] = 'Auto: Monto+Fecha única'
             conta_ext.at[c_idx, 'Anotación'] = 'Auto: Monto+Fecha única'
 
-    # 4. Sumas N a 1 y 1 a N
+    diferencias = {1.53, 82.00, 94.00, 69.00, 29.00, 0.0}
+    if '_suggested' not in conta_ext.columns:
+        conta_ext['_suggested'] = False
+        
+    # 4. Sumas N a 1 y 1 a N (COMO SUGERENCIAS)
     fechas = set(banco_ext.loc[~banco_ext['_matched'], 'Fecha']).union(
              set(conta_ext.loc[~conta_ext['_matched'], 'Fecha']))
              
@@ -221,7 +252,7 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame):
         unmatched_b = banco_ext[(~banco_ext['_matched']) & (banco_ext['Fecha'] == f)]
         unmatched_c = conta_ext[(~conta_ext['_matched']) & (conta_ext['Fecha'] == f)]
         pool_b = [(idx, float(r.get('Monto-Banco', 0) or 0)) for idx, r in unmatched_b.iterrows()]
-        pool_c = [(idx, float(r.get('Monto-Conta', 0) or 0)) for idx, r in unmatched_c.iterrows()]
+        pool_c = [(idx, float(r.get('Monto-Conta', 0) or 0)) for idx, r in unmatched_c.iterrows() if not r.get('_suggested', False)]
         
         used_c = set()
         for b_idx, b_amt in pool_b:
@@ -229,27 +260,35 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame):
             valid_combos = []
             for r in range(2, min(5, len(avail_c) + 1)):
                 for combo in combinations(avail_c, r):
-                    if abs(sum(x[1] for x in combo) - b_amt) <= 0.01:
-                        valid_combos.append([x[0] for x in combo])
+                    suma_conta = sum(x[1] for x in combo)
+                    diff = round(abs(abs(b_amt) - abs(suma_conta)), 2)
+                    if diff in diferencias:
+                        valid_combos.append((combo, diff))
+                        
             if len(valid_combos) == 1:
-                combo_idxs = valid_combos[0]
+                combo_idxs = [x[0] for x in valid_combos[0][0]]
+                diff_val = valid_combos[0][1]
                 used_c.update(combo_idxs)
-                banco_ext.at[b_idx, '_matched'] = True
-                banco_ext.at[b_idx, 'MAR'] = 'X'
-                op_link = f"SUM-B{b_idx}"
+                
+                op_link = f"SUG-SUM-B{b_idx}"
                 banco_ext.at[b_idx, '# Operación2'] = op_link
-                banco_ext.at[b_idx, 'Anotación'] = 'Auto: 1 Banco = N Conta'
+                
+                if diff_val == 0.0:
+                    anot = 'Sugerido: 1 Banco = N Conta'
+                else:
+                    anot = f'Sugerido: 1 Banco = N Conta (Dif {diff_val})'
+                    
+                banco_ext.at[b_idx, 'Anotación'] = anot
                 for c_idx in combo_idxs:
-                    conta_ext.at[c_idx, '_matched'] = True
-                    conta_ext.at[c_idx, 'MAR'] = 'X'
                     conta_ext.at[c_idx, '# Operación2'] = op_link
-                    conta_ext.at[c_idx, 'Anotación'] = 'Auto: 1 Banco = N Conta'
+                    conta_ext.at[c_idx, 'Anotación'] = anot
+                    conta_ext.at[c_idx, '_suggested'] = True
                     
         # N Banco = 1 Conta (refrescar pools)
         unmatched_c2 = conta_ext[(~conta_ext['_matched']) & (conta_ext['Fecha'] == f)]
         unmatched_b2 = banco_ext[(~banco_ext['_matched']) & (banco_ext['Fecha'] == f)]
-        pool_c2 = [(idx, float(r.get('Monto-Conta', 0) or 0)) for idx, r in unmatched_c2.iterrows()]
-        pool_b2 = [(idx, float(r.get('Monto-Banco', 0) or 0)) for idx, r in unmatched_b2.iterrows()]
+        pool_c2 = [(idx, float(r.get('Monto-Conta', 0) or 0)) for idx, r in unmatched_c2.iterrows() if not r.get('_suggested', False)]
+        pool_b2 = [(idx, float(r.get('Monto-Banco', 0) or 0)) for idx, r in unmatched_b2.iterrows() if not str(banco_ext.at[idx, 'Anotación']).startswith('Sugerido')]
         
         used_b = set()
         for c_idx, c_amt in pool_c2:
@@ -257,25 +296,68 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame):
             valid_combos = []
             for r in range(2, min(5, len(avail_b) + 1)):
                 for combo in combinations(avail_b, r):
-                    if abs(sum(x[1] for x in combo) - c_amt) <= 0.01:
-                        valid_combos.append([x[0] for x in combo])
+                    suma_banco = sum(x[1] for x in combo)
+                    diff = round(abs(abs(suma_banco) - abs(c_amt)), 2)
+                    if diff in diferencias:
+                        valid_combos.append((combo, diff))
+                        
             if len(valid_combos) == 1:
-                combo_idxs = valid_combos[0]
+                combo_idxs = [x[0] for x in valid_combos[0][0]]
+                diff_val = valid_combos[0][1]
                 used_b.update(combo_idxs)
-                conta_ext.at[c_idx, '_matched'] = True
-                conta_ext.at[c_idx, 'MAR'] = 'X'
-                op_link = f"SUM-C{c_idx}"
+                
+                op_link = f"SUG-SUM-C{c_idx}"
                 conta_ext.at[c_idx, '# Operación2'] = op_link
-                conta_ext.at[c_idx, 'Anotación'] = 'Auto: N Banco = 1 Conta'
+                conta_ext.at[c_idx, '_suggested'] = True
+                
+                if diff_val == 0.0:
+                    anot = 'Sugerido: N Banco = 1 Conta'
+                else:
+                    anot = f'Sugerido: N Banco = 1 Conta (Dif {diff_val})'
+                    
+                conta_ext.at[c_idx, 'Anotación'] = anot
                 for b_idx in combo_idxs:
-                    banco_ext.at[b_idx, '_matched'] = True
-                    banco_ext.at[b_idx, 'MAR'] = 'X'
                     banco_ext.at[b_idx, '# Operación2'] = op_link
-                    banco_ext.at[b_idx, 'Anotación'] = 'Auto: N Banco = 1 Conta'
+                    banco_ext.at[b_idx, 'Anotación'] = anot
 
-    # Marcar los no conciliados con una anotación por defecto
-    banco_ext.loc[~banco_ext['_matched'], 'Anotación'] = 'Mov. solo en banco'
-    conta_ext.loc[~conta_ext['_matched'], 'Anotación'] = 'Mov. solo en conta'
+    # 5. Sugerencias por diferencias de montos específicos
+    diferencias = {1.53, 82.00, 94.00, 69.00, 29.00}
+    
+    conta_ext['_suggested'] = False
+    
+    for b_idx, row_b in banco_ext.iterrows():
+        if row_b['_matched']: continue
+        m_b = float(row_b.get('Monto-Banco', 0) or 0)
+        
+        for c_idx, row_c in conta_ext.iterrows():
+            if row_c['_matched']: continue
+            if row_c.get('_suggested', False): continue
+            
+            m_c = float(row_c.get('Monto-Conta', 0) or 0)
+            
+            diff = round(abs(abs(m_b) - abs(m_c)), 2)
+            if diff in diferencias:
+                op_link = f"SUG-DIF-{diff}-{b_idx}"
+                banco_ext.at[b_idx, '# Operación2'] = op_link
+                conta_ext.at[c_idx, '# Operación2'] = op_link
+                
+                banco_ext.at[b_idx, 'Anotación'] = f"Sugerido: Diferencia {diff}"
+                conta_ext.at[c_idx, 'Anotación'] = f"Sugerido: Diferencia {diff}"
+                
+                conta_ext.at[c_idx, '_suggested'] = True
+                break
+                
+    if '_suggested' in conta_ext.columns:
+        conta_ext = conta_ext.drop(columns=['_suggested'])
+
+    # Marcar los no conciliados con una anotación por defecto si está vacía
+    for idx, row in banco_ext[~banco_ext['_matched']].iterrows():
+        if not str(row.get('Anotación', '')).strip():
+            banco_ext.at[idx, 'Anotación'] = 'Mov. solo en banco'
+            
+    for idx, row in conta_ext[~conta_ext['_matched']].iterrows():
+        if not str(row.get('Anotación', '')).strip():
+            conta_ext.at[idx, 'Anotación'] = 'Mov. solo en conta'
 
     return banco_ext.drop(columns=['_matched']), conta_ext.drop(columns=['_matched'])
 
@@ -286,7 +368,7 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame) -> pd.Da
     """
     # Columnas del resultado final
     cols = [
-        'Fecha', 'MAR', 'TIPO', 'CODIGO', '# Operación2', 'DIF COMISON', 'Anotación',
+        'Fecha', 'Banco - Fecha', 'Conta - Fecha', 'MAR', 'TIPO', 'CODIGO', '# Operación2', 'DIF COMISON', 'Anotación',
         'Monto-Banco', 'Banco - Descripción', 'Banco - # Operación', 'Banco - Saldo',
         'Monto-Conta', 'Conta - # Registro', 'Conta - # Operación', 'Conta - Giro', 'Conta - Glosa', 'Conta - F. Conciliación', 'Conta - ¿Conciliado?'
     ]
@@ -314,14 +396,62 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame) -> pd.Da
         if c not in conta_ext.columns:
             conta_ext[c] = None
 
+    # Separar conciliados y no conciliados
+    b_match = banco_ext[banco_ext['MAR'] == 'X'].copy()
+    c_match = conta_ext[conta_ext['MAR'] == 'X'].copy()
+    b_unmatch = banco_ext[banco_ext['MAR'] != 'X'].copy()
+    c_unmatch = conta_ext[conta_ext['MAR'] != 'X'].copy()
+
+    # Fusionar filas conciliadas lado a lado
+    matched_rows = []
+    grupos = pd.unique(pd.concat([b_match['# Operación2'], c_match['# Operación2']]))
+    for g in grupos:
+        if str(g) == 'nan' or not str(g).strip(): 
+            continue
+        bg = b_match[b_match['# Operación2'] == g].reset_index(drop=True)
+        cg = c_match[c_match['# Operación2'] == g].reset_index(drop=True)
+        
+        n = max(len(bg), len(cg))
+        for i in range(n):
+            row = {}
+            for col in cols:
+                val_b = bg.at[i, col] if i < len(bg) else None
+                val_c = cg.at[i, col] if i < len(cg) else None
+                
+                def is_valid(v):
+                    return pd.notna(v) and str(v) != 'nan' and str(v) != ''
+                
+                if is_valid(val_b):
+                    row[col] = val_b
+                elif is_valid(val_c):
+                    row[col] = val_c
+                else:
+                    row[col] = None
+                    
+            # Si Conta - # Operación está vacío o '0', copiar desde Banco - # Operación
+            op_conta = row.get('Conta - # Operación')
+            op_banco = row.get('Banco - # Operación')
+            
+            def is_valid_op(v):
+                return pd.notna(v) and str(v) != 'nan' and str(v).strip() != '' and str(v).strip() != '0'
+                
+            if not is_valid_op(op_conta) and is_valid_op(op_banco):
+                row['Conta - # Operación'] = op_banco
+
+            matched_rows.append(row)
+
+    df_matched = pd.DataFrame(matched_rows, columns=cols) if matched_rows else pd.DataFrame(columns=cols)
+
     anexar = pd.concat(
-        [banco_ext[cols], conta_ext[cols]],
+        [df_matched, b_unmatch[cols], c_unmatch[cols]],
         ignore_index=True
     )
 
     # Crear una clave de ordenamiento para subir los conciliados arriba pero MANTENER LOS PARES JUNTOS
     def _is_matched(row):
         if row.get('MAR') == 'X': return 0
+        if 'Sugerido:' in str(row.get('Anotación', '')): return 0.5
+        if 'ITF' in str(row.get('Banco - Descripción', '')).upper(): return 2
         val = row.get('Conta - ¿Conciliado?')
         if pd.notna(val):
             s = str(val).strip().upper()
@@ -329,10 +459,16 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame) -> pd.Da
         return 1
 
     anexar['_orden_conciliado'] = anexar.apply(_is_matched, axis=1)
-    anexar['_op2_sort'] = anexar['# Operación2'].fillna('').astype(str)
+    
+    def get_op2_sort(row, ord_c):
+        if ord_c == 0.5:
+            return str(row.get('# Operación2', ''))
+        return ''
+        
+    anexar['_op2_sort'] = anexar.apply(lambda r: get_op2_sort(r, r['_orden_conciliado']), axis=1)
     
     anexar = anexar.sort_values(
-        by=['_orden_conciliado', 'Fecha', '_op2_sort']
+        by=['_orden_conciliado', '_op2_sort', 'Fecha']
     ).drop(columns=['_orden_conciliado', '_op2_sort']).reset_index(drop=True)
 
     return anexar
@@ -353,6 +489,7 @@ def _preparar_resumen(anexar1: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index()
     )
+    print(resumen)
     resumen['Diferencia'] = resumen['Monto-Banco'].fillna(0) - resumen['Monto-Conta'].fillna(0)
 
     # Ordenar: primero EGRESO, luego INGRESO; dentro de cada tipo por CODIGO
@@ -406,11 +543,38 @@ def _aplicar_formato(ruta: Path) -> None:
         # Altura de cabecera
         ws.row_dimensions[1].height = 30
 
+        # Encontrar índice de la columna MAR y Anotación
+        col_mar_idx = None
+        col_anot_idx = None
+        for i, cell in enumerate(ws[1]):
+            val = str(cell.value).strip()
+            if val == 'MAR':
+                col_mar_idx = i
+            elif val == 'Anotación':
+                col_anot_idx = i
+
         # Formato de datos
         for row in ws.iter_rows(min_row=2):
+            es_rojo = False
+            es_sugerido = False
+            
+            if nombre_hoja == 'Anexar1' and col_mar_idx is not None:
+                val_mar = row[col_mar_idx].value
+                if val_mar != 'X':
+                    es_rojo = True
+                    if col_anot_idx is not None:
+                        if 'Sugerido:' in str(row[col_anot_idx].value or ''):
+                            es_sugerido = True
+                            es_rojo = False
+
             for cell in row:
                 cell.alignment = Alignment(vertical='center')
                 cell.border    = borde
+                if es_rojo:
+                    cell.font = Font(color='FF0000') # Letra roja
+                elif es_sugerido:
+                    cell.font = Font(color='0070C0', bold=True) # Azul negrita para sugeridos
+                    
                 # Fechas en formato legible
                 if isinstance(cell.value, datetime):
                     cell.number_format = 'DD/MM/YYYY'

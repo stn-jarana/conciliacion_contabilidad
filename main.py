@@ -63,13 +63,6 @@ EMPRESAS = [
         ],
     },
     {
-        "nombre"  : "Southern Textil Network",
-        "monedas" : [
-            {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
-        ],
-    },
-    {
         "nombre"  : "Reforestadora Iñaupari",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
