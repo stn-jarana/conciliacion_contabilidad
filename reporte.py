@@ -49,7 +49,7 @@ def generar_reporte_inicial(
     tab_conta = _preparar_tab_contanet(conta)
 
     # ── Preparar Anexar1 (union vertical) ─────────────────────────────
-    anexar1 = _preparar_anexar1(tab_banco, tab_conta)
+    anexar1 = _preparar_anexar1(tab_banco, tab_conta, moneda=moneda)
 
     # ── Preparar Resumen ──────────────────────────────────────────────
     resumen = _preparar_resumen(anexar1)
@@ -155,7 +155,7 @@ def _preparar_tab_contanet(conta: pd.DataFrame) -> pd.DataFrame:
 
 from itertools import combinations
 
-def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame):
+def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, moneda: str = "Dolares (USD)"):
     """
     Algoritmo de conciliación automática con las reglas:
     1. Código igual → Conciliar automáticamente
@@ -243,7 +243,13 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame):
             banco_ext.at[b_idx, 'Anotación'] = 'Auto: Monto+Fecha única'
             conta_ext.at[c_idx, 'Anotación'] = 'Auto: Monto+Fecha única'
 
-    diferencias = {1.53, 82.00, 94.00, 69.00, 29.00, 0.0}
+    # Definir diferencias según la moneda elegida
+    if "Soles" in moneda or "PEN" in moneda:
+        diferencias_set = {10.50, 69.00, 4.30, 29.00}
+    else:
+        diferencias_set = {1.53, 82.00, 94.00, 69.00, 29.00}
+
+    diferencias = diferencias_set.union({0.0})
     if '_suggested' not in conta_ext.columns:
         conta_ext['_suggested'] = False
         
@@ -325,7 +331,7 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame):
                     banco_ext.at[b_idx, 'Anotación'] = anot
 
     # 5. Sugerencias por diferencias de montos específicos
-    diferencias = {1.53, 82.00, 94.00, 69.00, 29.00}
+    diferencias = diferencias_set
     
     conta_ext['_suggested'] = False
     
@@ -365,7 +371,7 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame):
 
     return banco_ext.drop(columns=['_matched']), conta_ext.drop(columns=['_matched'])
 
-def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame) -> pd.DataFrame:
+def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: str = "Dolares (USD)") -> pd.DataFrame:
     """
     Une Tab_Banco y Tab_Contanet verticalmente con todas las columnas combinadas.
     Las columnas que no existen en una tabla quedan en NaN (el especialista las llena).
@@ -373,17 +379,25 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame) -> pd.Da
     # Columnas del resultado final
     cols = [
         'Fecha', 'Banco - Fecha', 'Conta - Fecha', 'MAR', 'TIPO', 'CODIGO', '# Operación2', 'DIF COMISON', 'Anotación',
-        'Monto-Banco', 'Banco - Descripción', 'Banco - # Operación', 'Banco - Saldo',
-        'Monto-Conta', 'Conta - # Registro', 'Conta - # Operación', 'Conta - Giro', 'Conta - Glosa', 'Conta - F. Conciliación', 'Conta - ¿Conciliado?'
+        'Monto-Banco', 'Banco - Descripción', 'Banco - # Operación',
+        'Monto-Conta', 'Conta - # Registro', 'Conta - # Operación', 'Conta - Giro', 'Conta - Glosa'
     ]
 
     banco_ext = tab_banco.copy()
     conta_ext = tab_conta.copy()
     # Remove placeholder rows that contain header texts like 'Información anterior' or column names
     def _clean_df(df):
-        # Drop rows where any cell equals its column header or the phrase 'Información anterior'
-        mask = df.apply(lambda row: any(str(v).strip() == col or str(v).strip() == 'Información anterior'
-                                 for col, v in zip(df.columns, row)), axis=1)
+        # Drop rows where any cell equals its column header or the phrase 'Información anterior' or headers like '# Registro'
+        words_to_drop = {'INFORMACIÓN ANTERIOR', '# REGISTRO', 'REGISTRO', '# OPERACIÓN', 'GIRO', 'GLOSA', 'FECHA', 'MEDIO PAGO'}
+        mask = df.apply(
+            lambda row: any(
+                str(v).strip() == col or 
+                str(v).strip().upper() in words_to_drop or 
+                'INFORMACIÓN ANTERIOR' in str(v).strip().upper()
+                for col, v in zip(df.columns, row)
+            ),
+            axis=1
+        )
         return df[~mask]
     banco_ext = _clean_df(banco_ext)
     conta_ext = _clean_df(conta_ext)
@@ -404,7 +418,7 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame) -> pd.Da
             conta_ext[col] = conta_ext[col].astype(object)
     
     # ── APLICAR ALGORITMO DE CONCILIACIÓN AUTOMÁTICA ──
-    banco_ext, conta_ext = _conciliacion_automatica(banco_ext, conta_ext)
+    banco_ext, conta_ext = _conciliacion_automatica(banco_ext, conta_ext, moneda=moneda)
 
     # Asegurar que todas las columnas existan en ambos para evitar warnings
     for c in cols:
@@ -459,53 +473,20 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame) -> pd.Da
 
     df_matched = pd.DataFrame(matched_rows, columns=cols) if matched_rows else pd.DataFrame(columns=cols)
 
-    # ---- Sugerencias 1 a 1 (sin MAR) ----
-    suggestion_rows = []
-    used_groups = []  # grupos que se combinarán y deben eliminarse de los DataFrames individuales
-    sug_groups = pd.unique(pd.concat([b_unmatch['# Operación2'], c_unmatch['# Operación2']]))
-    for g in sug_groups:
-        if pd.isna(g) or str(g).strip() == '':
-            continue
-        bg = b_unmatch[b_unmatch['# Operación2'] == g].reset_index(drop=True)
-        cg = c_unmatch[c_unmatch['# Operación2'] == g].reset_index(drop=True)
-        # Solo considerar si ambos tienen anotación de sugerencia
-        if not bg['Anotación'].astype(str).str.contains('Sugerido:').any() or not cg['Anotación'].astype(str).str.contains('Sugerido:').any():
-            continue
-        # Determinar si es 1 a 1 o 1 a many
-        if len(bg) == 1 and len(cg) == 1:
-            # Combinar la única fila de cada lado
-            row = {}
-            for col in cols:
-                val_b = bg.at[0, col]
-                val_c = cg.at[0, col]
-                if pd.notna(val_b) and str(val_b) not in ('nan', ''):
-                    row[col] = val_b
-                elif pd.notna(val_c) and str(val_c) not in ('nan', ''):
-                    row[col] = val_c
-                else:
-                    row[col] = None
-            # No copiar número de operación en filas sugeridas; se completará tras conciliación automática o decisión del especialista
-            suggestion_rows.append(row)
-            used_groups.append(g)
-        else:
-            # Caso 1 a many o many a 1: no combinar, se mantendrán filas separadas
-            continue
-
-    df_suggest = pd.DataFrame(suggestion_rows, columns=cols) if suggestion_rows else pd.DataFrame(columns=cols)
-
-    # Eliminar filas individuales que ya fueron combinadas
-    b_unmatch_filtered = b_unmatch[~b_unmatch['# Operación2'].isin(used_groups)]
-    c_unmatch_filtered = c_unmatch[~c_unmatch['# Operación2'].isin(used_groups)]
+    # Mantener todas las filas no conciliadas (incluyendo sugerencias) separadas
+    b_unmatch_filtered = b_unmatch[cols]
+    c_unmatch_filtered = c_unmatch[cols]
 
     # Concatenar todo
     anexar = pd.concat(
-        [df_matched, df_suggest, b_unmatch_filtered[cols], c_unmatch_filtered[cols]],
+        [df_matched, b_unmatch_filtered, c_unmatch_filtered],
         ignore_index=True
     )
 
     # Columnas para decisión del especialista
     anexar['Conciliar'] = ''
-    anexar['No Conciliar'] = ''
+    anexar['# Operación a Conciliar'] = ''
+    anexar['Anotación-Conta'] = ''
 
     # Crear una clave de ordenamiento:
     # 0 = Conciliados (MAR == 'X')
@@ -635,7 +616,7 @@ def _aplicar_formato(ruta: Path) -> None:
                 col_anot_idx = i
             elif val == 'Conciliar':
                 col_conc_idx = i
-            elif val == 'No Conciliar':
+            elif val == '# Operación a Conciliar' or val == 'No Conciliar':
                 col_no_conc_idx = i
             elif val == '# Operación2':
                 col_op2_idx = i
@@ -668,9 +649,18 @@ def _aplicar_formato(ruta: Path) -> None:
                                 es_sugerido = True
                                 es_rojo = False
 
-            for cell in row:
+            for idx, cell in enumerate(row):
                 cell.alignment = Alignment(vertical='center')
                 cell.border    = borde
+                
+                # Fondo distintivo para columnas en Anexar1: Celeste claro para Banco, Verde claro para Conta
+                if nombre_hoja == 'Anexar1':
+                    header_name = str(ws.cell(row=1, column=idx + 1).value or '')
+                    if 'Banco' in header_name:
+                        cell.fill = PatternFill('solid', fgColor='D9E1F2')  # Celeste claro
+                    elif 'Conta' in header_name:
+                        cell.fill = PatternFill('solid', fgColor='E2EFDA')  # Verde claro
+
                 if es_itf:
                     cell.font = Font(color='7F7F7F', italic=True)  # Gris itálica para ITF
                 elif es_rojo:
@@ -682,10 +672,9 @@ def _aplicar_formato(ruta: Path) -> None:
                 if isinstance(cell.value, datetime):
                     cell.number_format = 'DD/MM/YYYY'
 
-        # Combinar celdas Conciliar/No Conciliar para grupos sugeridos 1-a-muchos
+        # Combinar ÚNICAMENTE celdas de la columna 'Conciliar' para grupos sugeridos
         if (nombre_hoja == 'Anexar1' and col_op2_idx is not None
-                and col_conc_idx is not None and col_no_conc_idx is not None
-                and col_anot_idx is not None):
+                and col_conc_idx is not None and col_anot_idx is not None):
             group_rows = {}
             for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
                 op2_val = row[col_op2_idx].value
@@ -698,10 +687,6 @@ def _aplicar_formato(ruta: Path) -> None:
                     ws.merge_cells(
                         start_row=rows[0], start_column=col_conc_idx + 1,
                         end_row=rows[-1],  end_column=col_conc_idx + 1
-                    )
-                    ws.merge_cells(
-                        start_row=rows[0], start_column=col_no_conc_idx + 1,
-                        end_row=rows[-1],  end_column=col_no_conc_idx + 1
                     )
 
         # Autoajuste de columnas

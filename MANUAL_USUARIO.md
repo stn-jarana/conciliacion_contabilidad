@@ -168,15 +168,16 @@ En la hoja `Anexar1` hay filas del banco y filas de contabilidad intercaladas. E
 | Columna | Qué completar |
 |---|---|
 | **MAR** | Escribir `X` en la fila del banco Y en la fila de contabilidad que se corresponden |
-| **# Operación2** | En la fila de contabilidad, colocar el número de operación del banco correspondiente |
+| **Conciliar** | Escribir `X` para aprobar conciliar filas sugeridas (1-a-1) |
+| **# Operación a Conciliar** | En la fila del movimiento del banco, colocar el N° de Registro o N° de Operación de contabilidad con el que se desea conciliar |
 | **DIF COMISON** | Si hay diferencia por comisión bancaria, registrarla aquí |
 | **COD_SUB** | Código auxiliar de subcuenta si aplica |
 
 ### Criterio de vinculación
 
 Dos filas son un "par conciliado" cuando:
-- El **monto** del banco y de contabilidad coinciden (se acepta diferencia de hasta S/. 0.01).
-- La **fecha** es igual o difiere como máximo 1 día.
+- Se emparejan automáticamente o se aprueban sugerencias en la hoja `Anexar1`.
+- Se coloca el N° de registro / operación contable en la columna **# Operación a Conciliar** en la fila del banco.
 - Se coloca **`X`** en la columna `MAR` de ambas filas.
 
 Las filas que el especialista **no marque** quedarán como partidas abiertas (solo en banco o solo en contabilidad).

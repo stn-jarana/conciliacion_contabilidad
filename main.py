@@ -10,70 +10,70 @@ EMPRESAS = [
         "nombre"  : "Southern Textil Network (STN)",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "Integrated Textile Solutions (ITS)",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "CMT del Sur",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "Dynamitex",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "DINSURA",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "Perú Commerce",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "Inversiones Forestales del Sur (INFOSUR)",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "Thimble Sourcing",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "Reforestadora Iñaupari",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "TECA Peruvian Group",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
 ]
@@ -211,7 +211,9 @@ def flujo_reporte_inicial(config: dict) -> None:
     conta = conta.drop(columns=['col_vacia'])
     conta = conta[
         conta['nro_registro'].notna() &
-        ~conta['nro_registro'].str.startswith('Saldo', na=False)
+        ~conta['nro_registro'].astype(str).str.startswith('Saldo', na=False) &
+        ~conta['nro_registro'].astype(str).str.contains('Registro|N°|No|Nro', case=False, na=False) &
+        ~conta['fecha_mov'].astype(str).str.contains('Fecha', case=False, na=False)
     ]
     conta['fecha_mov']          = pd.to_datetime(conta['fecha_mov'],          dayfirst=True, errors='coerce')
     conta['fecha_conciliacion'] = pd.to_datetime(conta['fecha_conciliacion'], dayfirst=True, errors='coerce')

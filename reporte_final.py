@@ -71,25 +71,96 @@ def generar_reporte_final(
     else:
         anexar1['MAR'] = ''
 
-    # ── Aprobar sugerencias 1-a-1 marcadas por el especialista ───────────
-    # Si el especialista puso algo en la columna 'Conciliar' para una fila
-    # con anotación 'Sugerido:' y que tiene AMBOS montos (banco y conta en
-    if 'Conciliar' in anexar1.columns and 'Anotación' in anexar1.columns:
-        mask_sugerido_1a1 = (
-            anexar1['Anotación'].astype(str).str.contains('Sugerido:', na=False)
-            & anexar1['Conciliar'].apply(lambda v: pd.notna(v) and str(v).strip() not in ('', 'nan'))
-            & anexar1['Monto-Banco'].notna()
-            & anexar1['Monto-Conta'].notna()
-        )
-        if mask_sugerido_1a1.any():
-            anexar1.loc[mask_sugerido_1a1, 'MAR'] = 'X'
-            # Copiar # Operación del banco al campo # Operación2 (usado para el cruce)
-            if 'Banco - # Operación' in anexar1.columns and '# Operación2' in anexar1.columns:
-                op_banco = anexar1.loc[mask_sugerido_1a1, 'Banco - # Operación'].apply(
-                    lambda v: str(v) if pd.notna(v) and str(v) not in ('nan', '') else pd.NA
-                )
-                anexar1.loc[mask_sugerido_1a1, '# Operación2'] = op_banco
+    # ── 1. PRIORIDAD ABSOLUTA: Procesar vinculación manual por N° de Asiento / Operación ────────
+    col_op_conciliar = None
+    for posible_col in ['# Operación a Conciliar', 'No Conciliar', 'N° Asiento a conciliar']:
+        if posible_col in anexar1.columns:
+            col_op_conciliar = posible_col
+            break
 
+    if col_op_conciliar:
+        # Buscar todas las filas que tengan un número de operación ingresado por el especialista
+        mask_op_manual = anexar1[col_op_conciliar].apply(lambda v: pd.notna(v) and str(v).strip() not in ('', 'nan', '0'))
+        
+        for idx_src in anexar1[mask_op_manual].index:
+            val_target = str(anexar1.at[idx_src, col_op_conciliar]).strip()
+            es_banco_src = pd.notna(anexar1.at[idx_src, 'Monto-Banco'])
+            
+            if es_banco_src:
+                mask_target = anexar1['Monto-Conta'].notna() & (
+                    (anexar1['Conta - # Registro'].astype(str).str.strip() == val_target) |
+                    (anexar1['Conta - # Operación'].astype(str).str.strip() == val_target) |
+                    (anexar1['# Operación2'].astype(str).str.strip() == val_target)
+                )
+            else:
+                mask_target = anexar1['Monto-Banco'].notna() & (
+                    (anexar1['Banco - # Operación'].astype(str).str.strip() == val_target) |
+                    (anexar1['# Operación2'].astype(str).str.strip() == val_target)
+                )
+                
+            matches_target = anexar1[mask_target]
+            if not matches_target.empty:
+                all_banco = [idx_src] if es_banco_src else list(matches_target.index)
+                all_conta = list(matches_target.index) if es_banco_src else [idx_src]
+                
+                # N Banco a 1 Conta
+                if len(all_banco) > 1 and len(all_conta) == 1:
+                    c_idx = all_conta[0]
+                    all_banco_sorted = sorted(all_banco, key=lambda i: abs(float(anexar1.at[i, 'Monto-Banco'] or 0)), reverse=True)
+                    main_b_idx = all_banco_sorted[0]
+                    other_b_idxs = all_banco_sorted[1:]
+                    
+                    other_info = ", ".join([f"Monto {anexar1.at[i, 'Monto-Banco']} (#Op {anexar1.at[i, 'Banco - # Operación']})" for i in other_b_idxs])
+                    
+                    for b_i in all_banco:
+                        anexar1.at[b_i, 'MAR'] = 'X'
+                        anexar1.at[b_i, '# Operación2'] = f"MANUAL-{val_target}"
+                    anexar1.at[c_idx, 'MAR'] = 'X'
+                    anexar1.at[c_idx, '# Operación2'] = f"MANUAL-{val_target}"
+                    
+                    anexar1.at[main_b_idx, 'Anotación'] = f"Manual por # Op ({val_target}) [Principal | Incluye otros movs: {other_info}]"
+                    anexar1.at[c_idx, 'Anotación'] = f"Manual por # Op ({val_target}) [Incluye otros movs banco: {other_info}]"
+                # 1 Banco a N Conta
+                elif len(all_conta) > 1 and len(all_banco) == 1:
+                    b_idx = all_banco[0]
+                    all_conta_sorted = sorted(all_conta, key=lambda i: abs(float(anexar1.at[i, 'Monto-Conta'] or 0)), reverse=True)
+                    main_c_idx = all_conta_sorted[0]
+                    other_c_idxs = all_conta_sorted[1:]
+                    
+                    other_info = ", ".join([f"Monto {anexar1.at[i, 'Monto-Conta']} (#Reg {anexar1.at[i, 'Conta - # Registro']})" for i in other_c_idxs])
+                    
+                    for c_i in all_conta:
+                        anexar1.at[c_i, 'MAR'] = 'X'
+                        anexar1.at[c_i, '# Operación2'] = f"MANUAL-{val_target}"
+                    anexar1.at[b_idx, 'MAR'] = 'X'
+                    anexar1.at[b_idx, '# Operación2'] = f"MANUAL-{val_target}"
+                    
+                    anexar1.at[main_c_idx, 'Anotación'] = f"Manual por # Op ({val_target}) [Principal | Incluye otros movs conta: {other_info}]"
+                    anexar1.at[b_idx, 'Anotación'] = f"Manual por # Op ({val_target}) [Incluye otros movs conta: {other_info}]"
+                else:
+                    # 1 a 1 simple
+                    b_idx = all_banco[0]
+                    c_idx = all_conta[0]
+                    anexar1.at[b_idx, 'MAR'] = 'X'
+                    anexar1.at[c_idx, 'MAR'] = 'X'
+                    
+                    op_link = f"MANUAL-{val_target}"
+                    anexar1.at[b_idx, '# Operación2'] = op_link
+                    anexar1.at[c_idx, '# Operación2'] = op_link
+                    
+                    anexar1.at[b_idx, 'Anotación'] = f"Manual por especialista ({val_target})"
+                    anexar1.at[c_idx, 'Anotación'] = f"Manual por especialista ({val_target})"
+
+    # ── 2. Aprobar sugerencias si el especialista colocó una 'X' ÚNICAMENTE en la columna 'Conciliar' ─────────
+    if 'Conciliar' in anexar1.columns and 'Anotación' in anexar1.columns:
+        mask_sugerido_conciliar = (
+            anexar1['Conciliar'].apply(lambda v: pd.notna(v) and str(v).strip().upper() in ('X', 'SI', '1'))
+            & anexar1['# Operación2'].apply(lambda v: pd.notna(v) and str(v).strip() not in ('', 'nan'))
+        )
+        for op2_group in anexar1.loc[mask_sugerido_conciliar, '# Operación2'].unique():
+            # Solo marcar si no fue modificado o ya conciliado manualmente
+            mask_grp = (anexar1['# Operación2'] == op2_group) & (anexar1['MAR'] != 'X')
+            anexar1.loc[mask_grp, 'MAR'] = 'X'
 
     # ── Identificar filas 1-a-1 aprobadas (tienen ambos montos en la misma fila)
     mask_combinadas_aprobadas = (
@@ -187,14 +258,15 @@ def _cruzar_marcados(
         op2_b = str(rb.get('# Operación2', '')).strip()
         matched = False
 
-        # Buscar en conta una fila cuyo # Operación2 coincida con # Operación del banco
+        # Buscar en conta una fila cuyo # Operación2 coincida
         for j, rc in conta_marcado.iterrows():
             if j in usados_conta:
                 continue
             op2_c = str(rc.get('# Operación2', '')).strip()
             op_b  = str(rb.get('Banco - # Operación',  '')).strip()
+            op_c  = str(rc.get('Conta - # Operación',  '')).strip()
 
-            if op2_b and op2_c and (op2_c == op_b or op2_b == str(rc.get('Conta - # Operación', '')).strip()):
+            if op2_b and op2_c and (op2_b == op2_c or op2_c == op_b or op2_b == op_c):
                 filas.append(_fila_conciliada(rb, rc))
                 usados_conta.add(j)
                 usados_banco.add(i)
