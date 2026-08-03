@@ -421,12 +421,22 @@ def _aplicar_formato_final(ruta: Path) -> None:
 
         ws.row_dimensions[1].height = 30
 
+        COLS_MONTO = {'Monto-Banco', 'Monto-Conta'}
+        # Detectar índices de columnas de monto en esta hoja
+        monto_col_idxs = set()
+        for i, cell in enumerate(ws[1]):
+            if str(cell.value or '').strip() in COLS_MONTO:
+                monto_col_idxs.add(i)
+
         for row in ws.iter_rows(min_row=2):
-            for cell in row:
+            for idx, cell in enumerate(row):
                 cell.alignment = Alignment(vertical='center')
                 cell.border    = borde
                 if isinstance(cell.value, datetime):
                     cell.number_format = 'DD/MM/YYYY'
+                # Negrita en columnas de monto
+                if idx in monto_col_idxs:
+                    cell.font = Font(bold=True)
 
         for col in ws.columns:
             max_len   = 0

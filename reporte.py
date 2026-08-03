@@ -148,6 +148,10 @@ def _preparar_tab_contanet(conta: pd.DataFrame) -> pd.DataFrame:
     df['CODIGO']       = df['Monto-Conta']
     df['DIF COMISON']  = 0
     df['# Operación2'] = df['Conta - # Operación']
+    # Marcar filas sin monto (ingreso=0 y egreso=0) para separarlas al final
+    mask_sin_monto = (df['Ingreso'].fillna(0) == 0) & (df['Egreso'].fillna(0) == 0)
+    df['Anotación'] = ''
+    df.loc[mask_sin_monto, 'Anotación'] = 'Mov. sin monto (0)'
     # Quitar columnas auxiliares de cálculo
     df = df.drop(columns=['Ingreso', 'Egreso'])
     return df
@@ -165,7 +169,12 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
     """
     banco_ext['_matched'] = False
     conta_ext['_matched'] = False
-    
+
+    # Excluir de la conciliación los movimientos de Contanet sin monto (ingreso=0 y egreso=0)
+    # Se identifican porque tienen Monto-Conta == 0 y la anotación 'Mov. sin monto (0)'
+    mask_sin_monto = conta_ext.get('Anotación', pd.Series([''] * len(conta_ext))).str.contains('sin monto', case=False, na=False)
+    conta_ext.loc[mask_sin_monto, '_matched'] = True  # Marcar como ya procesados para ignorarlos
+
     # 1. Código igual
     for b_idx, row_b in banco_ext.iterrows():
         if row_b['_matched']: continue
@@ -330,18 +339,151 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
                     banco_ext.at[b_idx, '# Operación2'] = op_link
                     banco_ext.at[b_idx, 'Anotación'] = anot
 
+    # 4.5. Sugerencias por Factoring (Glosa contiene 'factoring' y montos iguales sin importar la fecha)
+    for b_idx, row_b in banco_ext.iterrows():
+        if row_b['_matched']: continue
+        if str(banco_ext.at[b_idx, 'Anotación']).startswith('Sugerido'): continue
+        m_b = float(row_b.get('Monto-Banco', 0) or 0)
+        if m_b == 0: continue
+        
+        for c_idx, row_c in conta_ext.iterrows():
+            if row_c['_matched']: continue
+            if row_c.get('_suggested', False): continue
+            if str(conta_ext.at[c_idx, 'Anotación']).startswith('Sugerido'): continue
+            
+            glosa_c = str(row_c.get('Conta - Glosa', '')).lower()
+            if 'factoring' in glosa_c:
+                m_c = float(row_c.get('Monto-Conta', 0) or 0)
+                if round(abs(m_b - m_c), 2) == 0.0:
+                    op_link = f"SUG-FACT-{b_idx}-{c_idx}"
+                    banco_ext.at[b_idx, '# Operación2'] = op_link
+                    conta_ext.at[c_idx, '# Operación2'] = op_link
+                    
+                    anot_fact = "Sugerido: Factoring"
+                    banco_ext.at[b_idx, 'Anotación'] = anot_fact
+                    conta_ext.at[c_idx, 'Anotación'] = anot_fact
+                    
+                    conta_ext.at[c_idx, '_suggested'] = True
+                    break
+
+    # 4.6. Sugerencias por Cambio de Moneda (Glosa 'cambio'/'moneda'/'tc' y Descripción 'COMU')
+    for b_idx, row_b in banco_ext.iterrows():
+        if row_b['_matched']: continue
+        if str(banco_ext.at[b_idx, 'Anotación']).startswith('Sugerido'): continue
+        
+        desc_b = str(row_b.get('Banco - Descripción', '')).upper()
+        if 'COMU' in desc_b:
+            m_b = float(row_b.get('Monto-Banco', 0) or 0)
+            if m_b == 0: continue
+            
+            for c_idx, row_c in conta_ext.iterrows():
+                if row_c['_matched']: continue
+                if row_c.get('_suggested', False): continue
+                if str(conta_ext.at[c_idx, 'Anotación']).startswith('Sugerido'): continue
+                
+                glosa_c = str(row_c.get('Conta - Glosa', '')).lower()
+                if 'cambio' in glosa_c or 'moneda' in glosa_c or 'tc' in glosa_c:
+                    m_c = float(row_c.get('Monto-Conta', 0) or 0)
+                    if round(abs(abs(m_b) - abs(m_c)), 2) == 0.0:
+                        op_link = f"SUG-CAMBIO-{b_idx}-{c_idx}"
+                        banco_ext.at[b_idx, '# Operación2'] = op_link
+                        conta_ext.at[c_idx, '# Operación2'] = op_link
+                        
+                        anot_cambio = "Sugerido: Cambio de Moneda (COMUS)"
+                        banco_ext.at[b_idx, 'Anotación'] = anot_cambio
+                        conta_ext.at[c_idx, 'Anotación'] = anot_cambio
+                        
+                        conta_ext.at[c_idx, '_suggested'] = True
+                        break
+
     # 5. Sugerencias por diferencias de montos específicos
     diferencias = diferencias_set
     
-    conta_ext['_suggested'] = False
-    
     for b_idx, row_b in banco_ext.iterrows():
         if row_b['_matched']: continue
+        if str(banco_ext.at[b_idx, 'Anotación']).startswith('Sugerido'): continue
         m_b = float(row_b.get('Monto-Banco', 0) or 0)
         
         for c_idx, row_c in conta_ext.iterrows():
             if row_c['_matched']: continue
             if row_c.get('_suggested', False): continue
+            if str(conta_ext.at[c_idx, 'Anotación']).startswith('Sugerido'): continue
+            
+            m_c = float(row_c.get('Monto-Conta', 0) or 0)
+            
+            diff = round(abs(abs(m_b) - abs(m_c)), 2)
+            if diff in diferencias:
+                op_link = f"SUG-DIF-{diff}-{b_idx}"
+                banco_ext.at[b_idx, '# Operación2'] = op_link
+                conta_ext.at[c_idx, '# Operación2'] = op_link
+                
+                banco_ext.at[b_idx, 'Anotación'] = f"Sugerido: Diferencia {diff}"
+                conta_ext.at[c_idx, 'Anotación'] = f"Sugerido: Diferencia {diff}"
+                
+                conta_ext.at[c_idx, '_suggested'] = True
+                break
+
+    # 5.4. Sugerencia por Monto Único en todo el extracto (sin importar la fecha)
+    unmatched_b_df = banco_ext[(~banco_ext['_matched']) & (~banco_ext['Anotación'].astype(str).str.startswith('Sugerido'))]
+    unmatched_c_df = conta_ext[(~conta_ext['_matched']) & (~conta_ext['_suggested']) & (~conta_ext['Anotación'].astype(str).str.startswith('Sugerido'))]
+
+    # Contar frecuencias globales de cada monto en los no conciliados
+    counts_b = unmatched_b_df['Monto-Banco'].apply(lambda v: round(float(v or 0), 2)).value_counts()
+    counts_c = unmatched_c_df['Monto-Conta'].apply(lambda v: round(float(v or 0), 2)).value_counts()
+
+    for b_idx, row_b in unmatched_b_df.iterrows():
+        if str(banco_ext.at[b_idx, 'Anotación']).startswith('Sugerido'): continue
+        m_b = round(float(row_b.get('Monto-Banco', 0) or 0), 2)
+        if m_b == 0: continue
+
+        # Debe ser único tanto en banco como en contabilidad
+        if counts_b.get(m_b, 0) == 1 and counts_c.get(m_b, 0) == 1:
+            c_candidates = unmatched_c_df[
+                unmatched_c_df['Monto-Conta'].apply(lambda v: round(float(v or 0), 2)) == m_b
+            ]
+            if len(c_candidates) == 1:
+                c_idx = c_candidates.index[0]
+                if not str(conta_ext.at[c_idx, 'Anotación']).startswith('Sugerido') and not conta_ext.at[c_idx, '_suggested']:
+                    op_link = f"SUG-M-UNICO-{b_idx}-{c_idx}"
+                    banco_ext.at[b_idx, '# Operación2'] = op_link
+                    conta_ext.at[c_idx, '# Operación2'] = op_link
+
+                    anot_u = "Sugerido: Monto único (diferencia de días)"
+                    banco_ext.at[b_idx, 'Anotación'] = anot_u
+                    conta_ext.at[c_idx, 'Anotación'] = anot_u
+                    conta_ext.at[c_idx, '_suggested'] = True
+
+    # 5.5. Sugerencia por residuo único tras descarte (si queda exactamente 1 en Banco y 1 en Conta con mismo monto)
+    unmatched_b_rem = [
+        idx for idx, r in banco_ext.iterrows() 
+        if not r['_matched'] and not str(banco_ext.at[idx, 'Anotación']).startswith('Sugerido')
+    ]
+    unmatched_c_rem = [
+        idx for idx, r in conta_ext.iterrows() 
+        if not r['_matched'] and not r.get('_suggested', False) and not str(conta_ext.at[idx, 'Anotación']).startswith('Sugerido')
+    ]
+    if len(unmatched_b_rem) == 1 and len(unmatched_c_rem) == 1:
+        b_idx_rem = unmatched_b_rem[0]
+        c_idx_rem = unmatched_c_rem[0]
+        m_b_rem = float(banco_ext.at[b_idx_rem, 'Monto-Banco'] or 0)
+        m_c_rem = float(conta_ext.at[c_idx_rem, 'Monto-Conta'] or 0)
+        
+        # Verificar si los montos coinciden
+        if round(abs(abs(m_b_rem) - abs(m_c_rem)), 2) == 0.0:
+            op_link_rem = f"SUG-RESIDUO-{b_idx_rem}-{c_idx_rem}"
+            banco_ext.at[b_idx_rem, '# Operación2'] = op_link_rem
+            conta_ext.at[c_idx_rem, '# Operación2'] = op_link_rem
+            
+            anot_rem = "Sugerido: Pareja resultante por descarte"
+            banco_ext.at[b_idx_rem, 'Anotación'] = anot_rem
+            conta_ext.at[c_idx_rem, 'Anotación'] = anot_rem
+            conta_ext.at[c_idx_rem, '_suggested'] = True
+        m_b = float(row_b.get('Monto-Banco', 0) or 0)
+        
+        for c_idx, row_c in conta_ext.iterrows():
+            if row_c['_matched']: continue
+            if row_c.get('_suggested', False): continue
+            if str(conta_ext.at[c_idx, 'Anotación']).startswith('Sugerido'): continue
             
             m_c = float(row_c.get('Monto-Conta', 0) or 0)
             
@@ -377,9 +519,10 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
     Las columnas que no existen en una tabla quedan en NaN (el especialista las llena).
     """
     # Columnas del resultado final
+    # Orden: datos banco | Monto-Banco | Monto-Conta | datos conta  (montos al centro para fácil comparación)
     cols = [
         'Fecha', 'Banco - Fecha', 'Conta - Fecha', 'MAR', 'TIPO', 'CODIGO', '# Operación2', 'DIF COMISON', 'Anotación',
-        'Monto-Banco', 'Banco - Descripción', 'Banco - # Operación',
+        'Banco - Descripción', 'Banco - # Operación', 'Monto-Banco',
         'Monto-Conta', 'Conta - # Registro', 'Conta - # Operación', 'Conta - Giro', 'Conta - Glosa'
     ]
 
@@ -484,36 +627,30 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
     )
 
     # Columnas para decisión del especialista
-    anexar['Conciliar'] = ''
+    anexar['Conciliar'] = anexar['Anotación'].apply(lambda a: 'X' if pd.notna(a) and 'Sugerido:' in str(a) else '')
     anexar['# Operación a Conciliar'] = ''
     anexar['Anotación-Conta'] = ''
 
     # Crear una clave de ordenamiento:
     # 0 = Conciliados (MAR == 'X')
     # 1 = Faltan conciliar pero tienen sugerencia ('Sugerido:' en Anotación)
-    # 2 = Solo en banco ('Mov. solo en banco')
-    # 3 = Solo en conta ('Mov. solo en conta')
+    # 2 = Mov. solo en banco / Mov. solo en conta
     # 4 = ITF (descripción contiene 'ITF')
+    # 5 = Sin monto (ingreso=0 y egreso=0)
     def _orden_grupo(row):
-        # ITF: siempre al final independientemente del MAR
+        anotacion = str(row.get('Anotación', ''))
+        # Sin monto: siempre al final de todo
+        if 'sin monto (0)' in anotacion.lower():
+            return 5
+        # ITF: al final pero antes de sin-monto
         if 'ITF' in str(row.get('Banco - Descripción', '')).upper():
             return 4
-        # Conciliados en ESTE proceso (único indicador válido: MAR == 'X')
-        # NOTA: Conta - ¿Conciliado? indica si estaba conciliado en el sistema
-        # contable ANTES de este proceso, NO indica que esté conciliado aquí.
         if row.get('MAR') == 'X':
             return 0
-        anotacion = str(row.get('Anotación', ''))
         # Sugeridos (faltan conciliar pero tienen sugerencia)
         if 'Sugerido:' in anotacion:
             return 1
-        # Solo en banco
-        if 'solo en banco' in anotacion.lower():
-            return 2
-        # Solo en conta
-        if 'solo en conta' in anotacion.lower():
-            return 3
-        # Cualquier otro caso sin clasificar
+        # Solo en banco o solo en conta
         return 2
 
     anexar['_orden_conciliado'] = anexar.apply(_orden_grupo, axis=1)
@@ -526,9 +663,24 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
 
     anexar['_op2_sort'] = anexar.apply(lambda r: get_op2_sort(r, r['_orden_conciliado']), axis=1)
 
+    # Para grupo 2 (solo en banco y solo en conta), calcular monto para ordenar de mayor a menor
+    def get_monto_abs(row):
+        mb = row.get('Monto-Banco')
+        mc = row.get('Monto-Conta')
+        vb = abs(float(mb)) if pd.notna(mb) and str(mb) != 'nan' else 0.0
+        vc = abs(float(mc)) if pd.notna(mc) and str(mc) != 'nan' else 0.0
+        return max(vb, vc)
+
+    anexar['_monto_abs'] = anexar.apply(get_monto_abs, axis=1)
+
+    # Para grupo 2, queremos de mayor a menor (-_monto_abs)
+    anexar['_monto_sort'] = anexar.apply(
+        lambda r: -r['_monto_abs'] if r['_orden_conciliado'] == 2 else 0, axis=1
+    )
+
     anexar = anexar.sort_values(
-        by=['_orden_conciliado', '_op2_sort', 'Fecha']
-    ).drop(columns=['_orden_conciliado', '_op2_sort']).reset_index(drop=True)
+        by=['_orden_conciliado', '_op2_sort', '_monto_sort', 'Fecha']
+    ).drop(columns=['_orden_conciliado', '_op2_sort', '_monto_abs', '_monto_sort']).reset_index(drop=True)
 
     return anexar
 
@@ -628,49 +780,104 @@ def _aplicar_formato(ruta: Path) -> None:
                 col_banco_desc_idx = i
                 break
 
-        # Formato de datos
+        # Pre-calcular para Anexar1: asignar color de fondo alternado por grupo sugerido
+        # Colores alternados para grupos sugeridos (pares de filas banco↔conta)
+        COLORES_SUG = ['FFF2CC', 'FCE4D6']  # Amarillo claro / Salmón muy claro (alternados)
+        sug_group_colors = {}  # op2_key -> color hex
+        if nombre_hoja == 'Anexar1' and col_op2_idx is not None and col_anot_idx is not None:
+            color_idx = 0
+            for row in ws.iter_rows(min_row=2):
+                op2_val = row[col_op2_idx].value
+                anot_val = str(row[col_anot_idx].value or '')
+                if op2_val and 'Sugerido:' in anot_val:
+                    key = str(op2_val)
+                    if key not in sug_group_colors:
+                        sug_group_colors[key] = COLORES_SUG[color_idx % len(COLORES_SUG)]
+                        color_idx += 1
+
+        # Formato de datos fila por fila
         for row in ws.iter_rows(min_row=2):
             es_rojo = False
             es_sugerido = False
             es_itf = False
+            es_sin_monto = False
+            color_sug_grupo = None
 
             if nombre_hoja == 'Anexar1' and col_mar_idx is not None:
                 val_mar = row[col_mar_idx].value
+                anot_val = str(row[col_anot_idx].value or '') if col_anot_idx is not None else ''
+
+                # Verificar si es sin monto
+                if 'sin monto (0)' in anot_val.lower():
+                    es_sin_monto = True
                 # Verificar si es ITF
-                if col_banco_desc_idx is not None:
+                elif col_banco_desc_idx is not None:
                     desc_val = str(row[col_banco_desc_idx].value or '')
                     if 'ITF' in desc_val.upper():
                         es_itf = True
-                if not es_itf:
+
+                if not es_itf and not es_sin_monto:
                     if val_mar != 'X':
                         es_rojo = True
-                        if col_anot_idx is not None:
-                            if 'Sugerido:' in str(row[col_anot_idx].value or ''):
-                                es_sugerido = True
-                                es_rojo = False
+                        if 'Sugerido:' in anot_val:
+                            es_sugerido = True
+                            es_rojo = False
+                            # Obtener color del grupo sugerido
+                            if col_op2_idx is not None:
+                                op2_key = str(row[col_op2_idx].value or '')
+                                color_sug_grupo = sug_group_colors.get(op2_key)
 
             for idx, cell in enumerate(row):
                 cell.alignment = Alignment(vertical='center')
                 cell.border    = borde
-                
-                # Fondo distintivo para columnas en Anexar1: Celeste claro para Banco, Verde claro para Conta
-                if nombre_hoja == 'Anexar1':
-                    header_name = str(ws.cell(row=1, column=idx + 1).value or '')
-                    if 'Banco' in header_name:
-                        cell.fill = PatternFill('solid', fgColor='D9E1F2')  # Celeste claro
-                    elif 'Conta' in header_name:
-                        cell.fill = PatternFill('solid', fgColor='E2EFDA')  # Verde claro
 
-                if es_itf:
-                    cell.font = Font(color='7F7F7F', italic=True)  # Gris itálica para ITF
+                header_name = str(ws.cell(row=1, column=idx + 1).value or '') if nombre_hoja == 'Anexar1' else ''
+
+                if es_sin_monto:
+                    # Fondo rosado muy claro con texto gris para filas sin monto
+                    cell.fill = PatternFill('solid', fgColor='F4CCFF')  # Violáceo muy claro
+                    cell.font = Font(color='7F7F7F', italic=True)
+                elif es_itf:
+                    cell.font = Font(color='7F7F7F', italic=True)
+                    # Mantener fondo de columna banco/conta si aplica
+                    if nombre_hoja == 'Anexar1':
+                        if 'Banco' in header_name:
+                            cell.fill = PatternFill('solid', fgColor='D9E1F2')
+                        elif 'Conta' in header_name:
+                            cell.fill = PatternFill('solid', fgColor='E2EFDA')
+                elif es_sugerido and color_sug_grupo:
+                    # Fondo alternado del grupo sugerido sobre toda la fila
+                    cell.fill = PatternFill('solid', fgColor=color_sug_grupo)
+                    cell.font = Font(color='7F3F00', bold=True)  # Marrón oscuro negrita para destacar
                 elif es_rojo:
-                    cell.font = Font(color='FF0000')  # Letra roja para no conciliados
-                elif es_sugerido:
-                    cell.font = Font(color='0070C0', bold=True)  # Azul negrita para sugeridos
-                    
+                    cell.font = Font(color='FF0000')
+                    # Fondo de columna banco/conta si aplica
+                    if nombre_hoja == 'Anexar1':
+                        if 'Banco' in header_name:
+                            cell.fill = PatternFill('solid', fgColor='D9E1F2')
+                        elif 'Conta' in header_name:
+                            cell.fill = PatternFill('solid', fgColor='E2EFDA')
+                else:
+                    # Fondo distintivo para columnas Banco/Conta en filas normales
+                    if nombre_hoja == 'Anexar1':
+                        if 'Banco' in header_name:
+                            cell.fill = PatternFill('solid', fgColor='D9E1F2')
+                        elif 'Conta' in header_name:
+                            cell.fill = PatternFill('solid', fgColor='E2EFDA')
+
                 # Fechas en formato legible
                 if isinstance(cell.value, datetime):
                     cell.number_format = 'DD/MM/YYYY'
+
+                # Negrita en columnas de monto para destacarlas
+                if header_name in ('Monto-Banco', 'Monto-Conta') and nombre_hoja == 'Anexar1':
+                    existing_font = cell.font
+                    cell.font = Font(
+                        bold=True,
+                        color=existing_font.color.rgb if existing_font.color and existing_font.color.type == 'rgb' else '000000',
+                        italic=existing_font.italic,
+                        size=existing_font.size,
+                    )
 
         # Combinar ÚNICAMENTE celdas de la columna 'Conciliar' para grupos sugeridos
         if (nombre_hoja == 'Anexar1' and col_op2_idx is not None
