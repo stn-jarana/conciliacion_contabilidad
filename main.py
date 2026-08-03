@@ -16,64 +16,66 @@ EMPRESAS = [
     {
         "nombre"  : "Integrated Textile Solutions (ITS)",
         "monedas" : [
-            {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Dolares (USD)", "sheet_bank": "ITS DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "ITS SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "CMT del Sur",
         "monedas" : [
-            {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Dolares (USD)", "sheet_bank": "CMT DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "CMT SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "Dynamitex",
         "monedas" : [
-            {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Dolares (USD)", "sheet_bank": "DYNAMITEX DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "DYNAMITEX SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "DINSURA",
         "monedas" : [
-            {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Dolares (USD)", "sheet_bank": "DINSURA DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "DINSURA SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "Perú Commerce",
         "monedas" : [
-            {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "P.COMMERCE",   "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "Inversiones Forestales del Sur (INFOSUR)",
         "monedas" : [
-            {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Dolares (USD)", "sheet_bank": "INFOSUR DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "INFOSUR SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
-        "nombre"  : "Thimble Sourcing",
+        "nombre"  : "Thimble Sourcing / TST",
         "monedas" : [
-            {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "TST",         "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "Reforestadora Iñaupari",
         "monedas" : [
-            {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "REF.IÑAPARI",  "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "TECA Peruvian Group",
         "monedas" : [
-            {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": False},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": "TECA",        "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+        ],
+    },
+    {
+        "nombre"  : "DIONISO",
+        "monedas" : [
+            {"nombre": "Soles (PEN)",   "sheet_bank": "DIONISO",     "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
 ]
