@@ -8,6 +8,7 @@ from pathlib import Path
 EMPRESAS = [
     {
         "nombre"  : "Southern Textil Network (STN)",
+        "ruc"     : "20376729126",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
             {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
@@ -15,6 +16,7 @@ EMPRESAS = [
     },
     {
         "nombre"  : "Integrated Textile Solutions (ITS)",
+        "ruc"     : "20601910603",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": "ITS DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
             {"nombre": "Soles (PEN)",   "sheet_bank": "ITS SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
@@ -22,6 +24,7 @@ EMPRESAS = [
     },
     {
         "nombre"  : "CMT del Sur",
+        "ruc"     : "20537658471",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": "CMT DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
             {"nombre": "Soles (PEN)",   "sheet_bank": "CMT SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
@@ -29,6 +32,7 @@ EMPRESAS = [
     },
     {
         "nombre"  : "Dynamitex",
+        "ruc"     : "20600995761",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": "DYNAMITEX DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
             {"nombre": "Soles (PEN)",   "sheet_bank": "DYNAMITEX SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
@@ -36,6 +40,7 @@ EMPRESAS = [
     },
     {
         "nombre"  : "DINSURA",
+        "ruc"     : "20603964571",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": "DINSURA DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
             {"nombre": "Soles (PEN)",   "sheet_bank": "DINSURA SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
@@ -43,12 +48,14 @@ EMPRESAS = [
     },
     {
         "nombre"  : "Perú Commerce",
+        "ruc"     : "20601234567",
         "monedas" : [
             {"nombre": "Soles (PEN)",   "sheet_bank": "P.COMMERCE",   "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "Inversiones Forestales del Sur (INFOSUR)",
+        "ruc"     : "20600567890",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": "INFOSUR DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
             {"nombre": "Soles (PEN)",   "sheet_bank": "INFOSUR SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
@@ -56,24 +63,28 @@ EMPRESAS = [
     },
     {
         "nombre"  : "Thimble Sourcing / TST",
+        "ruc"     : "20601987654",
         "monedas" : [
             {"nombre": "Soles (PEN)",   "sheet_bank": "TST",         "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "Reforestadora Iñaupari",
+        "ruc"     : "20601345678",
         "monedas" : [
             {"nombre": "Soles (PEN)",   "sheet_bank": "REF.IÑAPARI",  "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "TECA Peruvian Group",
+        "ruc"     : "20601456789",
         "monedas" : [
             {"nombre": "Soles (PEN)",   "sheet_bank": "TECA",        "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "DIONISO",
+        "ruc"     : "20601567890",
         "monedas" : [
             {"nombre": "Soles (PEN)",   "sheet_bank": "DIONISO",     "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
@@ -132,8 +143,12 @@ def seleccionar_empresa() -> dict:
                 continue
 
             print(f"\n  >> {empresa['nombre']} - {moneda['nombre']}\n")
-            # Incluir nombre de empresa en el config para el reporte
-            return {**moneda, 'empresa': empresa['nombre']}
+            # Incluir nombre de empresa y RUC en el config para el reporte
+            return {
+                **moneda,
+                'empresa': empresa['nombre'],
+                'ruc'    : empresa.get('ruc', ''),
+            }
 
 
 def seleccionar_accion() -> str:
@@ -211,6 +226,29 @@ def flujo_reporte_inicial(config: dict) -> None:
         'fecha_conciliacion', 'conciliado'
     ]
     conta = conta.drop(columns=['col_vacia'])
+
+    # Extraer el Saldo Contable Final ANTES de filtrar las filas de saldo
+    saldo_contable_final = None
+    mask_saldo_final = (
+        conta['nro_registro'].astype(str).str.contains('Saldo', case=False, na=False) &
+        conta['fecha_mov'].astype(str).str.contains('Final', case=False, na=False)
+    )
+    filas_saldo = conta[mask_saldo_final]
+    if not filas_saldo.empty:
+        # El saldo está en la columna 'ingreso' o 'egreso' según el signo
+        try:
+            val_ing = pd.to_numeric(
+                filas_saldo['ingreso'].astype(str).str.replace(',', '', regex=False).str.strip(),
+                errors='coerce'
+            ).fillna(0).iloc[0]
+            val_eg = pd.to_numeric(
+                filas_saldo['egreso'].astype(str).str.replace(',', '', regex=False).str.strip(),
+                errors='coerce'
+            ).fillna(0).iloc[0]
+            saldo_contable_final = float(val_ing - val_eg) if (val_ing != 0 or val_eg != 0) else None
+        except Exception:
+            saldo_contable_final = None
+
     conta = conta[
         conta['nro_registro'].notna() &
         ~conta['nro_registro'].astype(str).str.startswith('Saldo', na=False) &
@@ -235,6 +273,7 @@ def flujo_reporte_inicial(config: dict) -> None:
         conta,
         empresa=config.get('empresa', 'Southern Textil'),
         moneda=config['nombre'],
+        saldo_contable_final=saldo_contable_final,
     )
 
 
@@ -242,7 +281,7 @@ def flujo_reporte_inicial(config: dict) -> None:
 # FLUJO — REPORTE FINAL
 # ══════════════════════════════════════════════════════════
 
-def flujo_reporte_final() -> None:
+def flujo_reporte_final(config: dict) -> None:
     """Carga el Excel trabajado por el especialista y genera el reporte final."""
     from reporte_final import generar_reporte_final
 
@@ -254,7 +293,12 @@ def flujo_reporte_final() -> None:
     print()
 
     try:
-        generar_reporte_final(file_inicial)
+        generar_reporte_final(
+            file_inicial,
+            empresa=config.get('empresa', ''),
+            ruc=config.get('ruc', ''),
+            moneda=config.get('nombre', ''),
+        )
     except ValueError as e:
         print(f"\n  X Error: {e}\n")
 
@@ -269,4 +313,4 @@ accion = seleccionar_accion()
 if accion == "1":
     flujo_reporte_inicial(config)
 elif accion == "2":
-    flujo_reporte_final()
+    flujo_reporte_final(config)

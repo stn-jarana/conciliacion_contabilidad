@@ -32,15 +32,23 @@ def generar_reporte_inicial(
     ruta_salida: Path | None = None,
     empresa: str = "Southern Textil",
     moneda: str  = "Dolares (USD)",
+    saldo_contable_final: float | None = None,
 ) -> Path:
     """
     Genera el Excel de conciliacion inicial y su PDF de resumen.
     Devuelve la ruta del archivo Excel creado.
     Si no se pasa ruta_salida, crea los archivos en el directorio actual con timestamp.
+
+    Genera DOS archivos:
+      - Conciliacion_Detallada_*.xlsx  → todas las columnas visibles (uso técnico)
+      - Conciliacion_Inicial_*.xlsx    → columnas técnicas ocultas en Anexar1 (uso del especialista)
     """
     if ruta_salida is None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         ruta_salida = Path(f"Conciliacion_Inicial_{ts}.xlsx")
+
+    # Derivar ruta detallada desde la ruta inicial
+    ruta_detallada = Path(str(ruta_salida).replace("Conciliacion_Inicial_", "Conciliacion_Detallada_"))
 
     # ── Preparar Tab_Banco ────────────────────────────────────────────
     tab_banco = _preparar_tab_banco(bank)
@@ -54,33 +62,47 @@ def generar_reporte_inicial(
     # ── Preparar Resumen ──────────────────────────────────────────────
     resumen = _preparar_resumen(anexar1)
 
-    # ── Escribir Excel ────────────────────────────────────────────────
+    # ── Escribir Excel DETALLADO (copia técnica con todas las columnas) ──
+    with pd.ExcelWriter(ruta_detallada, engine='openpyxl', datetime_format='DD/MM/YYYY') as writer:
+        _exportar_banco(bank).to_excel(writer,   sheet_name='BANCO',    index=False)
+        _exportar_contanet(conta).to_excel(writer, sheet_name='CONTANET', index=False)
+        anexar1.to_excel(writer,                 sheet_name='Anexar1',  index=False)
+        resumen.to_excel(writer,                 sheet_name='Resumen',  index=False)
+        # Guardar saldo contable final como metadato en celda fija de CONTANET
+        if saldo_contable_final is not None:
+            wb_det = writer.book
+            ws_det = wb_det['CONTANET']
+            ws_det['A1'] = ws_det['A1'].value  # no tocar cabecera
+            # Escribir en una celda fuera del rango de datos (columna fija después de la última col)
+            ws_det.cell(row=1, column=30).value = '__SALDO_CONTABLE_FINAL__'
+            ws_det.cell(row=2, column=30).value = saldo_contable_final
+
+    _aplicar_formato(ruta_detallada)
+    print(f"\n  [OK] Reporte detallado generado: {ruta_detallada}")
+
+    # ── Escribir Excel INICIAL (uso del especialista) ──────────────────
     with pd.ExcelWriter(ruta_salida, engine='openpyxl', datetime_format='DD/MM/YYYY') as writer:
-        _exportar_banco(bank).to_excel(writer,   sheet_name='BANCO',        index=False)
-        _exportar_contanet(conta).to_excel(writer, sheet_name='CONTANET',   index=False)
-        anexar1.to_excel(writer,                 sheet_name='Anexar1',      index=False)
-        resumen.to_excel(writer,                 sheet_name='Resumen',      index=False)
+        _exportar_banco(bank).to_excel(writer,   sheet_name='BANCO',    index=False)
+        _exportar_contanet(conta).to_excel(writer, sheet_name='CONTANET', index=False)
+        anexar1.to_excel(writer,                 sheet_name='Anexar1',  index=False)
+        resumen.to_excel(writer,                 sheet_name='Resumen',  index=False)
+        # Guardar saldo contable final como metadato en celda fija de CONTANET
+        if saldo_contable_final is not None:
+            wb_ini = writer.book
+            ws_ini = wb_ini['CONTANET']
+            ws_ini.cell(row=1, column=30).value = '__SALDO_CONTABLE_FINAL__'
+            ws_ini.cell(row=2, column=30).value = saldo_contable_final
 
     # ── Aplicar formato visual Excel ──────────────────────────────────
     _aplicar_formato(ruta_salida)
+
+    # ── Ocultar columnas técnicas en Anexar1 del reporte inicial ──────
+    _ocultar_columnas_tecnicas(ruta_salida)
+
     print(f"\n  [OK] Reporte inicial generado: {ruta_salida}")
 
-    # ── Generar PDF de resumen (mismo nombre, extensión .pdf) ─────────
-    # Generación de PDF deshabilitada.
-    # from pdf_resumen import generar_pdf_resumen
-    # ruta_pdf = ruta_salida.with_suffix('.pdf')
-    # generar_pdf_resumen(
-    #     bank=bank,
-    #     conta=conta,
-    #     anexar1=anexar1,
-    #     resumen_df=resumen,
-    #     ruta_pdf=ruta_pdf,
-    #     empresa=empresa,
-    #     moneda=moneda,
-    #     ruta_excel=ruta_salida,
-    # )
-
     return ruta_salida
+
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -134,6 +156,10 @@ def _preparar_tab_banco(bank: pd.DataFrame) -> pd.DataFrame:
     # Ensure operation numbers keep leading zeros
     df['Banco - # Operación'] = df['Banco - # Operación'].astype(str)
     df['# Operación2'] = df['Banco - # Operación']
+    # Marcar filas con monto 0 para separarlas al final (no conciliables)
+    mask_sin_monto = df['Monto-Banco'].fillna(0) == 0
+    df['Anotación'] = ''
+    df.loc[mask_sin_monto, 'Anotación'] = 'Mov. sin monto (0)'
     return df
 
 
@@ -175,6 +201,10 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
     mask_sin_monto = conta_ext.get('Anotación', pd.Series([''] * len(conta_ext))).str.contains('sin monto', case=False, na=False)
     conta_ext.loc[mask_sin_monto, '_matched'] = True  # Marcar como ya procesados para ignorarlos
 
+    # Excluir de la conciliación los movimientos de Banco con monto 0
+    mask_sin_monto_b = banco_ext.get('Anotación', pd.Series([''] * len(banco_ext))).str.contains('sin monto', case=False, na=False)
+    banco_ext.loc[mask_sin_monto_b, '_matched'] = True  # Marcar como ya procesados para ignorarlos
+
     # 1. Código igual
     for b_idx, row_b in banco_ext.iterrows():
         if row_b['_matched']: continue
@@ -197,6 +227,37 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             conta_ext.at[c_idx, '# Operación2'] = op_b
             banco_ext.at[b_idx, 'Anotación'] = 'Auto: Código igual'
             conta_ext.at[c_idx, 'Anotación'] = 'Auto: Código igual'
+
+    # 1.2 Código igual pero monto diferente (diferencia > 0.01) → Sugerencia para validación
+    # Caso: banco='232946' monto=-364.7 | conta='232946' monto=-363.7 → dif=1.00
+    if '_suggested' not in conta_ext.columns:
+        conta_ext['_suggested'] = False
+    for b_idx, row_b in banco_ext.iterrows():
+        if row_b['_matched']: continue
+        if str(banco_ext.at[b_idx, 'Anotación']).startswith('Sugerido'): continue
+        op_b = str(row_b.get('Banco - # Operación', '')).strip()
+        if not op_b or op_b == 'nan': continue
+        m_b = float(row_b.get('Monto-Banco', 0) or 0)
+        if m_b == 0: continue
+
+        candidates = conta_ext[
+            (~conta_ext['_matched']) &
+            (~conta_ext.get('_suggested', pd.Series([False]*len(conta_ext)))) &
+            (~conta_ext['Anotación'].astype(str).str.startswith('Sugerido')) &
+            (conta_ext['Conta - # Operación'].astype(str).str.strip() == op_b) &
+            (abs(conta_ext['Monto-Conta'].fillna(0) - m_b) > 0.01)
+        ]
+        if len(candidates) == 1:
+            c_idx = candidates.index[0]
+            m_c = float(conta_ext.at[c_idx, 'Monto-Conta'] or 0)
+            dif = round(abs(m_b - m_c), 2)
+            op_link = f"SUG-COD-DIF-{op_b}"
+            banco_ext.at[b_idx, '# Operación2'] = op_link
+            conta_ext.at[c_idx, '# Operación2'] = op_link
+            anot = f"Sugerido: Código igual, diferencia de monto {dif}"
+            banco_ext.at[b_idx, 'Anotación'] = anot
+            conta_ext.at[c_idx, 'Anotación'] = anot
+            conta_ext.at[c_idx, '_suggested'] = True
 
     # 1.5 # Operación de Conta contenido en Descripción de Banco + Monto igual
     for c_idx, row_c in conta_ext.iterrows():
@@ -224,7 +285,78 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             banco_ext.at[b_idx, 'Anotación'] = 'Auto: # Operación en Glosa Banco'
             conta_ext.at[c_idx, 'Anotación'] = 'Auto: # Operación en Glosa Banco'
 
+    # 1.6 # Operación de Conta es sufijo del # Operación de Banco + Monto igual
+    for c_idx, row_c in conta_ext.iterrows():
+        if row_c['_matched']: continue
+        op_c = str(row_c.get('Conta - # Operación', '')).strip()
+        if not op_c or op_c == 'nan' or op_c == '0' or len(op_c) < 4: continue
+
+        m_c = float(row_c.get('Monto-Conta', 0) or 0)
+        # Generar variantes del código a buscar: exacto y sin ceros iniciales
+        op_c_stripped = op_c.lstrip('0') or op_c
+        variantes = list({op_c, op_c_stripped})
+
+        candidates = pd.DataFrame()
+        for variante in variantes:
+            if len(variante) < 4:
+                continue
+            c = banco_ext[
+                (~banco_ext['_matched']) &
+                (abs(banco_ext['Monto-Banco'].fillna(0) - m_c) <= 0.01) &
+                (banco_ext['Banco - # Operación'].astype(str).str.strip().str.endswith(variante))
+            ]
+            if not c.empty:
+                candidates = c
+                break
+
+        if len(candidates) == 1:
+            b_idx = candidates.index[0]
+            op_b = str(banco_ext.at[b_idx, 'Banco - # Operación']).strip()
+            banco_ext.at[b_idx, '_matched'] = True
+            conta_ext.at[c_idx, '_matched'] = True
+            banco_ext.at[b_idx, 'MAR'] = 'X'
+            conta_ext.at[c_idx, 'MAR'] = 'X'
+            op_link = op_b
+            banco_ext.at[b_idx, '# Operación2'] = op_link
+            conta_ext.at[c_idx, '# Operación2'] = op_link
+            banco_ext.at[b_idx, 'Anotación'] = 'Auto: Sufijo de # Operación'
+            conta_ext.at[c_idx, 'Anotación'] = 'Auto: Sufijo de # Operación'
+
+    # 1.65 Conciliación por descarte cuando quedan exactamente 1 banco y 1 conta no conciliados
+    # con mismo monto y misma fecha (fecha exacta). Cubre el caso donde todos los demás ya
+    # fueron emparejados por reglas anteriores y solo queda 1 de cada lado.
+    fechas_presentes = set(
+        banco_ext.loc[~banco_ext['_matched'], 'Fecha'].dropna().unique()
+    ).union(
+        set(conta_ext.loc[~conta_ext['_matched'], 'Fecha'].dropna().unique())
+    )
+    for f in fechas_presentes:
+        unm_b = banco_ext[(~banco_ext['_matched']) & (banco_ext['Fecha'] == f)]
+        unm_c = conta_ext[(~conta_ext['_matched']) & (conta_ext['Fecha'] == f)]
+
+        montos_b = unm_b['Monto-Banco'].apply(lambda v: round(float(v or 0), 2))
+        montos_c = unm_c['Monto-Conta'].apply(lambda v: round(float(v or 0), 2))
+
+        # Buscar montos que aparecen exactamente 1 vez en banco y 1 vez en conta
+        for m_val in montos_b.unique():
+            idxs_b = unm_b[montos_b == m_val].index.tolist()
+            idxs_c = unm_c[montos_c == m_val].index.tolist()
+            if len(idxs_b) == 1 and len(idxs_c) == 1:
+                b_idx = idxs_b[0]
+                c_idx = idxs_c[0]
+                op_b = str(banco_ext.at[b_idx, 'Banco - # Operación']).strip()
+                op_link = op_b if (op_b and op_b != 'nan') else f"AUTO-DESC-{b_idx}"
+                banco_ext.at[b_idx, '_matched'] = True
+                conta_ext.at[c_idx, '_matched'] = True
+                banco_ext.at[b_idx, 'MAR'] = 'X'
+                conta_ext.at[c_idx, 'MAR'] = 'X'
+                banco_ext.at[b_idx, '# Operación2'] = op_link
+                conta_ext.at[c_idx, '# Operación2'] = op_link
+                banco_ext.at[b_idx, 'Anotación'] = 'Auto: Descarte único por fecha+monto'
+                conta_ext.at[c_idx, 'Anotación'] = 'Auto: Descarte único por fecha+monto'
+
     # 2. Monto + Fecha única
+
     freq_b = {}
     freq_c = {}
     for b_idx, row_b in banco_ext[~banco_ext['_matched']].iterrows():
@@ -251,6 +383,44 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             
             banco_ext.at[b_idx, 'Anotación'] = 'Auto: Monto+Fecha única'
             conta_ext.at[c_idx, 'Anotación'] = 'Auto: Monto+Fecha única'
+
+    # 3. N Banco = N Conta mismo monto y fecha (sugerencia por emparejamiento posicional)
+    # Si hay exactamente N banco y N conta no conciliados con el mismo monto y fecha (N >= 2),
+    # no se puede saber cuál es cuál, pero sí que se corresponden 1 a 1.
+    # Se emparejan en orden de aparición como sugerencia.
+    if '_suggested' not in conta_ext.columns:
+        conta_ext['_suggested'] = False
+
+    freq_b2 = {}
+    freq_c2 = {}
+    for b_idx, row_b in banco_ext[~banco_ext['_matched']].iterrows():
+        k = (row_b['Fecha'], round(float(row_b.get('Monto-Banco', 0) or 0), 2))
+        freq_b2.setdefault(k, []).append(b_idx)
+
+    for c_idx, row_c in conta_ext[~conta_ext['_matched']].iterrows():
+        k = (row_c['Fecha'], round(float(row_c.get('Monto-Conta', 0) or 0), 2))
+        freq_c2.setdefault(k, []).append(c_idx)
+
+    for k, b_idxs in freq_b2.items():
+        if k not in freq_c2:
+            continue
+        c_idxs = freq_c2[k]
+        n = len(b_idxs)
+        # Solo aplica cuando hay el mismo número en ambos lados y es >= 2
+        if n < 2 or len(c_idxs) != n:
+            continue
+        # Emparejar posicionalmente
+        for pair_i, (b_idx, c_idx) in enumerate(zip(b_idxs, c_idxs)):
+            op_b = str(banco_ext.at[b_idx, 'Banco - # Operación']).strip()
+            op_link = op_b if (op_b and op_b != 'nan') else f"SUG-NxN-{b_idx}"
+            # Usar op_link único por par para que queden como pares distintos en el Excel
+            op_link_par = f"{op_link}-P{pair_i}"
+            banco_ext.at[b_idx, '# Operación2'] = op_link_par
+            conta_ext.at[c_idx, '# Operación2'] = op_link_par
+            anot = 'Sugerido: N Banco = N Conta mismo monto y fecha'
+            banco_ext.at[b_idx, 'Anotación'] = anot
+            conta_ext.at[c_idx, 'Anotación'] = anot
+            conta_ext.at[c_idx, '_suggested'] = True
 
     # Definir diferencias según la moneda elegida
     if "Soles" in moneda or "PEN" in moneda:
@@ -281,7 +451,10 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
                 for combo in combinations(avail_c, r):
                     suma_conta = sum(x[1] for x in combo)
                     diff = round(abs(abs(b_amt) - abs(suma_conta)), 2)
-                    if diff in diferencias:
+                    # La diferencia debe pertenecer al set permitido Y ser menor
+                    # que el monto del banco (evita asociar -10.5 con dos -10.5
+                    # alegando una "diferencia de comisión" de 10.5)
+                    if diff in diferencias and diff < abs(b_amt):
                         valid_combos.append((combo, diff))
                         
             if len(valid_combos) == 1:
@@ -317,7 +490,9 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
                 for combo in combinations(avail_b, r):
                     suma_banco = sum(x[1] for x in combo)
                     diff = round(abs(abs(suma_banco) - abs(c_amt)), 2)
-                    if diff in diferencias:
+                    # La diferencia debe pertenecer al set permitido Y ser menor
+                    # que el monto de conta (misma validación que en 1 Banco = N Conta)
+                    if diff in diferencias and diff < abs(c_amt):
                         valid_combos.append((combo, diff))
                         
             if len(valid_combos) == 1:
@@ -395,6 +570,42 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
                         
                         conta_ext.at[c_idx, '_suggested'] = True
                         break
+
+    # 4.7. Sugerencias por Sub-código / Referencia (ej. P07, P08) en Descripción de Banco y Glosa/Giro de Contabilidad + Monto igual
+    import re
+    for c_idx, row_c in conta_ext.iterrows():
+        if row_c['_matched']: continue
+        if row_c.get('_suggested', False): continue
+        if str(conta_ext.at[c_idx, 'Anotación']).startswith('Sugerido'): continue
+
+        glosa_c = f"{row_c.get('Conta - Glosa', '')} {row_c.get('Conta - Giro', '')}"
+        m_c = float(row_c.get('Monto-Conta', 0) or 0)
+        
+        # Buscar patrones alfanuméricos clave de referencia (ej. P07, P08, L-12, DPTO101, etc.)
+        tokens_c = set(re.findall(r'\b[A-Z]{1,4}\d{1,4}\b', glosa_c, re.IGNORECASE))
+        if not tokens_c: continue
+
+        for tok in tokens_c:
+            if len(tok) < 3: continue
+            tok_u = tok.upper()
+            
+            candidates = banco_ext[
+                (~banco_ext['_matched']) &
+                (~banco_ext['Anotación'].astype(str).str.startswith('Sugerido')) &
+                (abs(banco_ext['Monto-Banco'].fillna(0) - m_c) <= 0.01) &
+                (banco_ext['Banco - Descripción'].astype(str).str.contains(tok_u, case=False, na=False, regex=False))
+            ]
+            if len(candidates) == 1:
+                b_idx = candidates.index[0]
+                op_link = f"SUG-REF-{tok_u}"
+                banco_ext.at[b_idx, '# Operación2'] = op_link
+                conta_ext.at[c_idx, '# Operación2'] = op_link
+                
+                anot_sub = f"Sugerido: Referencia {tok_u} en Glosa"
+                banco_ext.at[b_idx, 'Anotación'] = anot_sub
+                conta_ext.at[c_idx, 'Anotación'] = anot_sub
+                conta_ext.at[c_idx, '_suggested'] = True
+                break
 
     # 5. Sugerencias por diferencias de montos específicos
     diferencias = diferencias_set
@@ -639,7 +850,7 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
     # 5 = Sin monto (ingreso=0 y egreso=0)
     def _orden_grupo(row):
         anotacion = str(row.get('Anotación', ''))
-        # Sin monto: siempre al final de todo
+        # Sin monto: siempre al final de todo (aplica a banco y a conta)
         if 'sin monto (0)' in anotacion.lower():
             return 5
         # ITF: al final pero antes de sin-monto
@@ -869,15 +1080,17 @@ def _aplicar_formato(ruta: Path) -> None:
                 if isinstance(cell.value, datetime):
                     cell.number_format = 'DD/MM/YYYY'
 
-                # Negrita en columnas de monto para destacarlas
+                # Negrita y color de fuente distintivo para columnas de monto
                 if header_name in ('Monto-Banco', 'Monto-Conta') and nombre_hoja == 'Anexar1':
                     existing_font = cell.font
+                    monto_color = '0033CC'  # Azul fuerte para ambos montos
                     cell.font = Font(
                         bold=True,
-                        color=existing_font.color.rgb if existing_font.color and existing_font.color.type == 'rgb' else '000000',
+                        color=monto_color,
                         italic=existing_font.italic,
-                        size=existing_font.size,
+                        size=11,
                     )
+                    cell.number_format = '#,##0.00'
 
         # Combinar ÚNICAMENTE celdas de la columna 'Conciliar' para grupos sugeridos
         if (nombre_hoja == 'Anexar1' and col_op2_idx is not None
@@ -911,5 +1124,30 @@ def _aplicar_formato(ruta: Path) -> None:
 
         # Congelar primera fila
         ws.freeze_panes = 'A2'
+
+    wb.save(ruta)
+
+
+def _ocultar_columnas_tecnicas(ruta: Path) -> None:
+    """
+    Oculta en la hoja Anexar1 las columnas técnicas que no necesita ver el especialista.
+    Se ocultan: Banco - Fecha, Conta - Fecha, TIPO, CODIGO, DIF COMISON, # Operación2
+    Se mantienen visibles las columnas operativas del especialista.
+    """
+    COLS_OCULTAR = {
+        'Banco - Fecha', 'Conta - Fecha', 'TIPO', 'CODIGO',
+        '# Operación2', 'DIF COMISON'
+    }
+
+    wb = openpyxl.load_workbook(ruta)
+    if 'Anexar1' not in wb.sheetnames:
+        wb.save(ruta)
+        return
+
+    ws = wb['Anexar1']
+    for cell in ws[1]:
+        if str(cell.value).strip() in COLS_OCULTAR:
+            col_letter = get_column_letter(cell.column)
+            ws.column_dimensions[col_letter].hidden = True
 
     wb.save(ruta)
