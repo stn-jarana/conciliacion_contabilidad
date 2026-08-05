@@ -255,6 +255,14 @@ def generar_reporte_final(
     # ── Aplicar formato visual a la hoja Conciliados ─────────────────
     _aplicar_formato_conciliados(ruta_salida)
 
+    # ── Pestañas adicionales: ITF Y COM, INGRESOS, EGRESOS, Anexar1 ──
+    # El orden de llamada define el orden de las pestañas (antes de Anexar1).
+    _escribir_hoja_itf_com(ruta_salida, ruta_inicial, meta)
+    _escribir_hoja_ingresos(ruta_salida, ruta_inicial, meta)
+    _escribir_hoja_egresos(ruta_salida, ruta_inicial, meta)
+    # Copia exacta de la hoja Anexar1 del archivo inicial (siempre al final)
+    _copiar_anexar1(ruta_inicial, ruta_salida)
+
     # ── Imprimir resumen en consola ───────────────────────────────────
     _imprimir_resumen_consola(saldos, partidas, ruta_salida)
 
@@ -1220,6 +1228,404 @@ def _aplicar_formato_conciliados(ruta: Path) -> None:
         ws.freeze_panes = 'A2'
 
     wb.save(ruta)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PESTAÑAS ADICIONALES DEL REPORTE FINAL
+# ══════════════════════════════════════════════════════════════════════
+
+# Paleta compartida para las pestañas de movimientos bancarios
+_COLOR_BANCO_HDR    = '1F4E79'   # Azul oscuro – encabezado banco
+_COLOR_INGRESO_HDR  = '375623'   # Verde oscuro – encabezado ingresos
+_COLOR_EGRESO_HDR   = 'C00000'   # Rojo oscuro  – encabezado egresos
+_COLOR_ITF_HDR      = '7030A0'   # Morado       – encabezado ITF y com
+_COLOR_META_BG      = 'D9E1F2'   # Azul muy claro – fondo filas de metadatos
+_COLOR_TOTAL_BG     = 'BDD7EE'   # Azul claro   – fila de total
+
+
+def _estilo_encabezado_mov(ws, fila_hdr: int, columnas: list[str], color_hex: str) -> None:
+    """Aplica estilo profesional a la fila de encabezado de una tabla de movimientos."""
+    thin = Side(style='thin', color='BFBFBF')
+    borde = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for col_idx, nombre in enumerate(columnas, start=1):
+        cell = ws.cell(row=fila_hdr, column=col_idx, value=nombre)
+        cell.font = Font(bold=True, color='FFFFFF', size=10, name='Aptos Narrow')
+        cell.fill = PatternFill('solid', fgColor=color_hex)
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        cell.border = borde
+    ws.row_dimensions[fila_hdr].height = 28
+
+
+def _fila_metadatos(ws, meta: dict, cuenta_label: str = '') -> int:
+    """
+    Escribe las 3 filas de metadatos (Cuenta, Moneda, Tipo de Cuenta) al inicio
+    de una pestaña de movimientos bancarios, igual que en el Formato Propuesto.
+    Devuelve el número de la siguiente fila disponible.
+    """
+    thin = Side(style='thin', color='BFBFBF')
+    borde_meta = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    cuenta_txt = cuenta_label or (
+        f"{meta.get('cuenta', '')} - {meta.get('empresa', '')}".strip(' -')
+    )
+    moneda_txt  = meta.get('moneda', '')
+    tipo_cta    = 'Corriente'
+
+    for fila, (etiq, valor) in enumerate(
+        [('Cuenta', cuenta_txt), ('Moneda', moneda_txt), ('Tipo de Cuenta', tipo_cta)],
+        start=1
+    ):
+        ws.cell(row=fila, column=1, value=etiq).font = Font(bold=True, size=10, name='Aptos Narrow')
+        ws.cell(row=fila, column=1).fill = PatternFill('solid', fgColor=_COLOR_META_BG)
+        ws.cell(row=fila, column=1).border = borde_meta
+        ws.cell(row=fila, column=2, value=valor).font = Font(size=10, name='Aptos Narrow')
+        ws.cell(row=fila, column=2).border = borde_meta
+        ws.row_dimensions[fila].height = 15
+
+    return 5  # fila de inicio del encabezado de tabla (fila 4 vacía, 5 = header)
+
+
+def _escribir_filas_datos(ws, datos: list[dict], columnas: list[str],
+                          fila_inicio: int, color_hex: str) -> int:
+    """
+    Escribe las filas de datos de movimientos bancarios con estilo alternado.
+    Devuelve la siguiente fila disponible (para el total).
+    """
+    thin = Side(style='thin', color='BFBFBF')
+    borde = Border(left=thin, right=thin, top=thin, bottom=thin)
+    COLORES_ALT = ['FFFFFF', 'F2F8FF']  # blanco / azul muy claro alternados
+
+    for i, dato in enumerate(datos):
+        fila = fila_inicio + i
+        bg = COLORES_ALT[i % 2]
+        for col_idx, col_key in enumerate(columnas, start=1):
+            valor = dato.get(col_key)
+            cell = ws.cell(row=fila, column=col_idx, value=valor)
+            cell.font = Font(size=10, name='Aptos Narrow')
+            cell.fill = PatternFill('solid', fgColor=bg)
+            cell.border = borde
+            cell.alignment = Alignment(vertical='center')
+            if isinstance(valor, (int, float)) and not isinstance(valor, bool):
+                cell.number_format = '#,##0.00'
+                cell.alignment = Alignment(horizontal='right', vertical='center')
+            elif isinstance(valor, datetime):
+                cell.number_format = 'DD/MM/YYYY'
+        ws.row_dimensions[fila].height = 15
+
+    return fila_inicio + len(datos)
+
+
+def _fila_total(ws, fila: int, n_cols: int, col_monto_idx: int,
+                fila_inicio: int, color_hex: str) -> None:
+    """Escribe la fila de TOTAL al final de una tabla de movimientos."""
+    thin = Side(style='thin', color='BFBFBF')
+    borde = Border(left=thin, right=thin, top=thin, bottom=thin)
+    col_letra = get_column_letter(col_monto_idx)
+    fila_fin   = fila - 1
+    for col in range(1, n_cols + 1):
+        cell = ws.cell(row=fila, column=col)
+        cell.fill   = PatternFill('solid', fgColor=_COLOR_TOTAL_BG)
+        cell.border = borde
+        if col == 1:
+            cell.value     = 'TOTAL'
+            cell.font      = Font(bold=True, size=10, name='Aptos Narrow')
+            cell.alignment = Alignment(horizontal='left', vertical='center')
+        elif col == col_monto_idx:
+            ref_inicio = f'{col_letra}{fila_inicio}'
+            ref_fin    = f'{col_letra}{fila_fin}'
+            cell.value        = f'=SUM({ref_inicio}:{ref_fin})'
+            cell.font         = Font(bold=True, size=10, name='Aptos Narrow')
+            cell.number_format = '#,##0.00'
+            cell.alignment    = Alignment(horizontal='right', vertical='center')
+    ws.row_dimensions[fila].height = 16
+
+
+def _ajustar_columnas(ws, columnas: list[str], anchos_min: list[float]) -> None:
+    """Ajusta el ancho de columnas con un mínimo definido."""
+    for col_idx, (_, ancho_min) in enumerate(zip(columnas, anchos_min), start=1):
+        col_letra = get_column_letter(col_idx)
+        max_len = ancho_min
+        for row in ws.iter_rows(min_col=col_idx, max_col=col_idx):
+            for cell in row:
+                try:
+                    largo = len(str(cell.value)) if cell.value is not None else 0
+                    if largo > max_len:
+                        max_len = largo
+                except Exception:
+                    pass
+        ws.column_dimensions[col_letra].width = min(max_len + 2, 50)
+
+
+def _df_banco_desde_inicial(ruta_inicial: Path) -> pd.DataFrame | None:
+    """Lee los movimientos bancarios del archivo inicial (hoja BANCO)."""
+    try:
+        xl = pd.ExcelFile(ruta_inicial)
+        if 'BANCO' in xl.sheet_names:
+            df = pd.read_excel(ruta_inicial, sheet_name='BANCO')
+            # Normalizar nombres de columnas
+            df.columns = [str(c).strip() for c in df.columns]
+            # Normalizar columna de monto
+            for posible in ['Monto-Banco', 'monto', 'Monto']:
+                if posible in df.columns:
+                    df['_monto'] = pd.to_numeric(df[posible], errors='coerce').fillna(0)
+                    break
+            else:
+                df['_monto'] = 0.0
+            # Normalizar columna de descripción
+            for posible in ['Descripción operación', 'Banco - Descripción', 'descripcion', 'Descripcion']:
+                if posible in df.columns:
+                    df['_desc'] = df[posible].astype(str)
+                    break
+            else:
+                df['_desc'] = ''
+            # Normalizar columna de operación
+            for posible in ['# Operación', 'Banco - # Operación', 'nro_operacion', '# Operacion']:
+                if posible in df.columns:
+                    df['_op'] = df[posible].astype(str)
+                    break
+            else:
+                df['_op'] = ''
+            # Normalizar fecha
+            for posible in ['Fecha', 'fecha']:
+                if posible in df.columns:
+                    df['_fecha'] = pd.to_datetime(df[posible], dayfirst=True, errors='coerce')
+                    break
+            else:
+                df['_fecha'] = pd.NaT
+            return df
+    except Exception as e:
+        print(f"  [Aviso] No se pudo leer BANCO del inicial: {e}")
+    return None
+
+
+def _copiar_anexar1(ruta_inicial: Path, ruta_final: Path) -> None:
+    """
+    Copia la hoja Anexar1 del archivo inicial al archivo final,
+    preservando valores, estilos, anchos de columna y alturas de fila.
+    La hoja se agrega con el nombre 'Anexar1' al final del workbook final.
+    """
+    try:
+        wb_src = openpyxl.load_workbook(ruta_inicial)
+        wb_dst = openpyxl.load_workbook(ruta_final)
+
+        if 'Anexar1' not in wb_src.sheetnames:
+            print("  [Aviso] Hoja Anexar1 no encontrada en el archivo inicial.")
+            return
+
+        ws_src = wb_src['Anexar1']
+
+        # Eliminar si ya existe en el destino
+        if 'Anexar1' in wb_dst.sheetnames:
+            del wb_dst['Anexar1']
+
+        # Crear nueva hoja al final
+        ws_dst = wb_dst.create_sheet('Anexar1')
+
+        # ── Copiar celdas (valor + estilo) ────────────────────────────
+        from copy import copy
+        for row in ws_src.iter_rows():
+            for cell in row:
+                new_cell = ws_dst.cell(row=cell.row, column=cell.column, value=cell.value)
+                if cell.has_style:
+                    new_cell.font        = copy(cell.font)
+                    new_cell.border      = copy(cell.border)
+                    new_cell.fill        = copy(cell.fill)
+                    new_cell.number_format = cell.number_format
+                    new_cell.alignment   = copy(cell.alignment)
+
+        # ── Copiar dimensiones de columnas ────────────────────────────
+        for col_letter, cd in ws_src.column_dimensions.items():
+            ws_dst.column_dimensions[col_letter].width  = cd.width
+            ws_dst.column_dimensions[col_letter].hidden = cd.hidden
+
+        # ── Copiar alturas de filas ────────────────────────────────────
+        for row_num, rd in ws_src.row_dimensions.items():
+            ws_dst.row_dimensions[row_num].height = rd.height
+
+        # ── Copiar celdas combinadas ───────────────────────────────────
+        for merged_range in ws_src.merged_cells.ranges:
+            ws_dst.merge_cells(str(merged_range))
+
+        # ── Copiar pane de congelación ─────────────────────────────────
+        ws_dst.freeze_panes = ws_src.freeze_panes
+
+        wb_dst.save(ruta_final)
+        print("  [OK] Pestaña 'Anexar1' copiada al reporte final.")
+    except Exception as e:
+        print(f"  [Error] No se pudo copiar Anexar1: {e}")
+
+
+def _escribir_hoja_itf_com(ruta_final: Path, ruta_inicial: Path, meta: dict) -> None:
+    """
+    Crea (o reemplaza) la pestaña 'ITF Y COM' en el reporte final con todos los
+    movimientos bancarios que corresponden a ITF o comisiones bancarias.
+    Criterio: descripción contiene 'ITF', 'COMIS', 'COM', 'MANTENIM', 'ENVIO', 'PORTES'.
+    """
+    df = _df_banco_desde_inicial(ruta_inicial)
+    if df is None or df.empty:
+        return
+
+    # Filtrar movimientos ITF / comisiones
+    patron_itf = r'ITF|COMIS|MANTEN|ENVIO|PORTES|CARGO\s+PORTES|CARGO\s+MANTEN'
+    mask = df['_desc'].str.contains(patron_itf, case=False, na=False, regex=True)
+    df_itf = df[mask].copy()
+
+    columnas    = ['Fecha', '# Operación', 'Descripción', 'Monto']
+    anchos_min  = [12.0, 16.0, 32.0, 14.0]
+    col_monto_i = 4  # índice (1-based) de la columna Monto
+
+    wb = openpyxl.load_workbook(ruta_final)
+    if 'ITF Y COM' in wb.sheetnames:
+        del wb['ITF Y COM']
+
+    # Insertar antes de 'Anexar1' si existe, sino al final
+    pos = len(wb.sheetnames)
+    if 'Anexar1' in wb.sheetnames:
+        pos = wb.sheetnames.index('Anexar1')
+    ws = wb.create_sheet('ITF Y COM', pos)
+
+    # Metadatos
+    fila_hdr = _fila_metadatos(ws, meta)
+
+    # Encabezado de tabla
+    _estilo_encabezado_mov(ws, fila_hdr, columnas, _COLOR_ITF_HDR)
+
+    # Datos
+    datos = []
+    for _, row in df_itf.iterrows():
+        fecha = row['_fecha']
+        datos.append({
+            'Fecha'       : fecha.to_pydatetime() if pd.notna(fecha) else None,
+            '# Operación' : row['_op'],
+            'Descripción' : row['_desc'],
+            'Monto'       : float(row['_monto']),
+        })
+
+    fila_datos_inicio = fila_hdr + 1
+    fila_sig = _escribir_filas_datos(ws, datos, columnas, fila_datos_inicio, _COLOR_ITF_HDR)
+
+    # Total
+    if datos:
+        _fila_total(ws, fila_sig, len(columnas), col_monto_i, fila_datos_inicio, _COLOR_ITF_HDR)
+
+    # Título de sección (fila 5 del formato propuesto)
+    ws.cell(row=fila_hdr - 1, column=3, value='COMISIONES BANCARIAS / ITF').font = Font(
+        bold=True, size=11, name='Aptos Narrow', color=_COLOR_ITF_HDR
+    )
+
+    _ajustar_columnas(ws, columnas, anchos_min)
+    ws.freeze_panes = 'A6'
+
+    wb.save(ruta_final)
+    print(f"  [OK] Pestaña 'ITF Y COM' generada ({len(datos)} movimientos).")
+
+
+def _escribir_hoja_ingresos(ruta_final: Path, ruta_inicial: Path, meta: dict) -> None:
+    """
+    Crea (o reemplaza) la pestaña 'INGRESOS' en el reporte final con todos los
+    movimientos bancarios con monto > 0 (excluye ITF y comisiones).
+    """
+    df = _df_banco_desde_inicial(ruta_inicial)
+    if df is None or df.empty:
+        return
+
+    patron_excluir = r'ITF|COMIS|MANTEN|ENVIO|PORTES'
+    mask_ingreso = (df['_monto'] > 0) & ~df['_desc'].str.contains(
+        patron_excluir, case=False, na=False, regex=True
+    )
+    df_ing = df[mask_ingreso].copy()
+
+    columnas   = ['Fecha', '# Operación', 'Descripción', 'Monto']
+    anchos_min = [12.0, 16.0, 32.0, 14.0]
+    col_monto_i = 4
+
+    wb = openpyxl.load_workbook(ruta_final)
+    if 'INGRESOS' in wb.sheetnames:
+        del wb['INGRESOS']
+
+    pos = len(wb.sheetnames)
+    if 'Anexar1' in wb.sheetnames:
+        pos = wb.sheetnames.index('Anexar1')
+    ws = wb.create_sheet('INGRESOS', pos)
+
+    fila_hdr = _fila_metadatos(ws, meta)
+    _estilo_encabezado_mov(ws, fila_hdr, columnas, _COLOR_INGRESO_HDR)
+
+    datos = []
+    for _, row in df_ing.iterrows():
+        fecha = row['_fecha']
+        datos.append({
+            'Fecha'       : fecha.to_pydatetime() if pd.notna(fecha) else None,
+            '# Operación' : row['_op'],
+            'Descripción' : row['_desc'],
+            'Monto'       : float(row['_monto']),
+        })
+
+    fila_datos_inicio = fila_hdr + 1
+    fila_sig = _escribir_filas_datos(ws, datos, columnas, fila_datos_inicio, _COLOR_INGRESO_HDR)
+
+    if datos:
+        _fila_total(ws, fila_sig, len(columnas), col_monto_i, fila_datos_inicio, _COLOR_INGRESO_HDR)
+
+    _ajustar_columnas(ws, columnas, anchos_min)
+    ws.freeze_panes = 'A6'
+
+    wb.save(ruta_final)
+    print(f"  [OK] Pestaña 'INGRESOS' generada ({len(datos)} movimientos).")
+
+
+def _escribir_hoja_egresos(ruta_final: Path, ruta_inicial: Path, meta: dict) -> None:
+    """
+    Crea (o reemplaza) la pestaña 'EGRESOS' en el reporte final con todos los
+    movimientos bancarios con monto < 0 (excluye ITF y comisiones).
+    """
+    df = _df_banco_desde_inicial(ruta_inicial)
+    if df is None or df.empty:
+        return
+
+    patron_excluir = r'ITF|COMIS|MANTEN|ENVIO|PORTES'
+    mask_egreso = (df['_monto'] < 0) & ~df['_desc'].str.contains(
+        patron_excluir, case=False, na=False, regex=True
+    )
+    df_egr = df[mask_egreso].copy()
+
+    columnas   = ['Fecha', '# Operación', 'Descripción', 'Monto']
+    anchos_min = [12.0, 16.0, 32.0, 14.0]
+    col_monto_i = 4
+
+    wb = openpyxl.load_workbook(ruta_final)
+    if 'EGRESOS' in wb.sheetnames:
+        del wb['EGRESOS']
+
+    pos = len(wb.sheetnames)
+    if 'Anexar1' in wb.sheetnames:
+        pos = wb.sheetnames.index('Anexar1')
+    ws = wb.create_sheet('EGRESOS', pos)
+
+    fila_hdr = _fila_metadatos(ws, meta)
+    _estilo_encabezado_mov(ws, fila_hdr, columnas, _COLOR_EGRESO_HDR)
+
+    datos = []
+    for _, row in df_egr.iterrows():
+        fecha = row['_fecha']
+        datos.append({
+            'Fecha'       : fecha.to_pydatetime() if pd.notna(fecha) else None,
+            '# Operación' : row['_op'],
+            'Descripción' : row['_desc'],
+            'Monto'       : float(row['_monto']),
+        })
+
+    fila_datos_inicio = fila_hdr + 1
+    fila_sig = _escribir_filas_datos(ws, datos, columnas, fila_datos_inicio, _COLOR_EGRESO_HDR)
+
+    if datos:
+        _fila_total(ws, fila_sig, len(columnas), col_monto_i, fila_datos_inicio, _COLOR_EGRESO_HDR)
+
+    _ajustar_columnas(ws, columnas, anchos_min)
+    ws.freeze_panes = 'A6'
+
+    wb.save(ruta_final)
+    print(f"  [OK] Pestaña 'EGRESOS' generada ({len(datos)} movimientos).")
 
 
 # ══════════════════════════════════════════════════════════════════════

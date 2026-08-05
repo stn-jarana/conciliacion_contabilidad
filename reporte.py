@@ -33,22 +33,19 @@ def generar_reporte_inicial(
     empresa: str = "Southern Textil",
     moneda: str  = "Dolares (USD)",
     saldo_contable_final: float | None = None,
+    banco: str = '',
 ) -> Path:
     """
     Genera el Excel de conciliacion inicial y su PDF de resumen.
     Devuelve la ruta del archivo Excel creado.
     Si no se pasa ruta_salida, crea los archivos en el directorio actual con timestamp.
 
-    Genera DOS archivos:
-      - Conciliacion_Detallada_*.xlsx  → todas las columnas visibles (uso técnico)
-      - Conciliacion_Inicial_*.xlsx    → columnas técnicas ocultas en Anexar1 (uso del especialista)
+    Genera UN archivo:
+      - CBI_*.xlsx    → columnas técnicas ocultas en Anexar1 (uso del especialista)
     """
     if ruta_salida is None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         ruta_salida = Path(f"Conciliacion_Inicial_{ts}.xlsx")
-
-    # Derivar ruta detallada desde la ruta inicial
-    ruta_detallada = Path(str(ruta_salida).replace("Conciliacion_Inicial_", "Conciliacion_Detallada_"))
 
     # ── Preparar Tab_Banco ────────────────────────────────────────────
     tab_banco = _preparar_tab_banco(bank)
@@ -62,24 +59,6 @@ def generar_reporte_inicial(
     # ── Preparar Resumen ──────────────────────────────────────────────
     resumen = _preparar_resumen(anexar1)
 
-    # ── Escribir Excel DETALLADO (copia técnica con todas las columnas) ──
-    with pd.ExcelWriter(ruta_detallada, engine='openpyxl', datetime_format='DD/MM/YYYY') as writer:
-        _exportar_banco(bank).to_excel(writer,   sheet_name='BANCO',    index=False)
-        _exportar_contanet(conta).to_excel(writer, sheet_name='CONTANET', index=False)
-        anexar1.to_excel(writer,                 sheet_name='Anexar1',  index=False)
-        resumen.to_excel(writer,                 sheet_name='Resumen',  index=False)
-        # Guardar saldo contable final como metadato en celda fija de CONTANET
-        if saldo_contable_final is not None:
-            wb_det = writer.book
-            ws_det = wb_det['CONTANET']
-            ws_det['A1'] = ws_det['A1'].value  # no tocar cabecera
-            # Escribir en una celda fuera del rango de datos (columna fija después de la última col)
-            ws_det.cell(row=1, column=30).value = '__SALDO_CONTABLE_FINAL__'
-            ws_det.cell(row=2, column=30).value = saldo_contable_final
-
-    _aplicar_formato(ruta_detallada)
-    print(f"\n  [OK] Reporte detallado generado: {ruta_detallada}")
-
     # ── Escribir Excel INICIAL (uso del especialista) ──────────────────
     with pd.ExcelWriter(ruta_salida, engine='openpyxl', datetime_format='DD/MM/YYYY') as writer:
         _exportar_banco(bank).to_excel(writer,   sheet_name='BANCO',    index=False)
@@ -92,6 +71,12 @@ def generar_reporte_inicial(
             ws_ini = wb_ini['CONTANET']
             ws_ini.cell(row=1, column=30).value = '__SALDO_CONTABLE_FINAL__'
             ws_ini.cell(row=2, column=30).value = saldo_contable_final
+        # Guardar nombre del banco como metadato
+        if banco:
+            wb_ini = writer.book
+            ws_ini = wb_ini['CONTANET']
+            ws_ini.cell(row=1, column=31).value = '__BANCO__'
+            ws_ini.cell(row=2, column=31).value = banco
 
     # ── Aplicar formato visual Excel ──────────────────────────────────
     _aplicar_formato(ruta_salida)
@@ -739,9 +724,9 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
 
     banco_ext = tab_banco.copy()
     conta_ext = tab_conta.copy()
-    # Remove placeholder rows that contain header texts like 'Información anterior' or column names
+    # Elimina filas donde cualquier celda es igual al header o a la frase 'Información anterior' o cabeceras como '# Registro'
     def _clean_df(df):
-        # Drop rows where any cell equals its column header or the phrase 'Información anterior' or headers like '# Registro'
+        # Elimina filas donde cualquier celda es igual al header o a la frase 'Información anterior' o cabeceras como '# Registro'
         words_to_drop = {'INFORMACIÓN ANTERIOR', '# REGISTRO', 'REGISTRO', '# OPERACIÓN', 'GIRO', 'GLOSA', 'FECHA', 'MEDIO PAGO'}
         mask = df.apply(
             lambda row: any(
@@ -755,7 +740,7 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
         return df[~mask]
     banco_ext = _clean_df(banco_ext)
     conta_ext = _clean_df(conta_ext)
-    # Mark ITF rows as reconciled and set operation number to 00000000
+    # Marcar las celdas con ITF como conciliadas y marcar el número de operación a 00000000
     itf_mask = banco_ext['Banco - Descripción'].astype(str).str.upper().str.contains('ITF')
     banco_ext.loc[itf_mask, 'MAR'] = 'X'
     banco_ext.loc[itf_mask, 'Banco - # Operación'] = '00000000'
@@ -838,9 +823,89 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
     )
 
     # Columnas para decisión del especialista
-    anexar['Conciliar'] = anexar['Anotación'].apply(lambda a: 'X' if pd.notna(a) and 'Sugerido:' in str(a) else '')
+    # Filas conciliadas (MAR=='X') → 'Conciliados'; sugeridos → 'X'; resto → ''
+    def _valor_conciliar(row):
+        if row.get('MAR') == 'X':
+            return 'Conciliados'
+        if pd.notna(row.get('Anotación')) and 'Sugerido:' in str(row.get('Anotación', '')):
+            return 'X'
+        return ''
+    anexar['Conciliar'] = anexar.apply(_valor_conciliar, axis=1)
     anexar['# Operación a Conciliar'] = ''
     anexar['Anotación-Conta'] = ''
+
+    # ── Calcular DIF COMISON real en pares sugeridos ──────────────────
+    # Para pares 1-a-N: DIF = monto_banco - suma(montos_conta), en la fila banco.
+    # Para pares N-a-1: DIF = suma(montos_banco) - monto_conta, en la fila conta.
+    # En los demás casos (1-a-1 sugerido): DIF = monto_banco - monto_conta, en la fila banco.
+    # Las filas del lado "múltiple" siempre quedan con DIF COMISON = 0.
+    mask_sugeridos = anexar['Anotación'].astype(str).str.startswith('Sugerido:')
+    if mask_sugeridos.any():
+        grupos_sug = anexar.loc[mask_sugeridos, '# Operación2'].dropna().unique()
+        for op2 in grupos_sug:
+            if not str(op2).strip() or str(op2) == 'nan':
+                continue
+            idxs = anexar.index[
+                mask_sugeridos & (anexar['# Operación2'].astype(str) == str(op2))
+            ].tolist()
+            idx_banco = [i for i in idxs if pd.notna(anexar.at[i, 'Monto-Banco'])]
+            idx_conta = [i for i in idxs if pd.notna(anexar.at[i, 'Monto-Conta'])]
+
+            if not idx_banco or not idx_conta:
+                continue
+
+            suma_b = sum(float(anexar.at[i, 'Monto-Banco'] or 0) for i in idx_banco)
+            suma_c = sum(float(anexar.at[i, 'Monto-Conta'] or 0) for i in idx_conta)
+            dif = round(suma_b - suma_c, 2)
+
+            if len(idx_banco) == 1 and len(idx_conta) >= 1:
+                # 1 Banco = N Conta → diferencia en la fila banco
+                anexar.at[idx_banco[0], 'DIF COMISON'] = dif
+                for i in idx_conta:
+                    anexar.at[i, 'DIF COMISON'] = 0
+            elif len(idx_banco) >= 1 and len(idx_conta) == 1:
+                # N Banco = 1 Conta → diferencia en la fila conta
+                for i in idx_banco:
+                    anexar.at[i, 'DIF COMISON'] = 0
+                anexar.at[idx_conta[0], 'DIF COMISON'] = dif
+            else:
+                # N-a-N: no aplica, limpiar todo
+                for i in idx_banco + idx_conta:
+                    anexar.at[i, 'DIF COMISON'] = 0
+
+    # ── 4 columnas de clasificación de diferencias ────────────────────
+    # Se calculan DESPUÉS de DIF COMISON para que Comisiones refleje el valor real.
+    # ITF        → descripción banco contiene 'ITF'
+    # Comisiones → DIF COMISON != 0 (diferencia de comisión bancaria)
+    # Error      → Anotación indica diferencia de monto con mismo código
+    # Otros      → vacío (el especialista marca si aplica)
+
+    def _marcar_itf(row):
+        desc = str(row.get('Banco - Descripción', '') or '')
+        return 'X' if 'ITF' in desc.upper() else ''
+
+    def _marcar_comisiones(row):
+        # Si la fila ya es ITF, no marcar también como comisión
+        desc = str(row.get('Banco - Descripción', '') or '')
+        if 'ITF' in desc.upper():
+            return ''
+        dif = row.get('DIF COMISON')
+        try:
+            return 'X' if dif is not None and float(dif) != 0.0 else ''
+        except (ValueError, TypeError):
+            return ''
+
+    def _marcar_error(row):
+        anot = str(row.get('Anotación', '') or '')
+        # Diferencia de monto con mismo código operación (error contable/bancario)
+        if 'diferencia de monto' in anot.lower():
+            return 'X'
+        return ''
+
+    anexar['ITF']        = anexar.apply(_marcar_itf, axis=1)
+    anexar['Comisiones'] = anexar.apply(_marcar_comisiones, axis=1)
+    anexar['Error']      = anexar.apply(_marcar_error, axis=1)
+    anexar['Otros']      = ''
 
     # Crear una clave de ordenamiento:
     # 0 = Conciliados (MAR == 'X')
@@ -943,12 +1008,22 @@ def _aplicar_formato(ruta: Path) -> None:
         ws = wb[nombre_hoja]
         color_hex = _COLORES.get(nombre_hoja, '404040')
 
+        # Colores específicos para las 4 columnas de clasificación de diferencias
+        _COLORES_CLASIF = {
+            'ITF'        : 'C00000',  # Rojo oscuro
+            'Comisiones' : 'ED7D31',  # Naranja
+            'Error'      : 'BF8F00',  # Amarillo ocre
+            'Otros'      : '70AD47',  # Verde claro
+        }
+
         # Formato de cabecera (fila 1)
         for cell in ws[1]:
             col_name = str(cell.value)
             
             if nombre_hoja == 'Anexar1':
-                if 'Banco' in col_name:
+                if col_name in _COLORES_CLASIF:
+                    fg = _COLORES_CLASIF[col_name]
+                elif 'Banco' in col_name:
                     fg = '1F4E79'  # Azul oscuro para Banco
                 elif 'Conta' in col_name:
                     fg = '375623'  # Verde oscuro para Contanet
@@ -1044,6 +1119,13 @@ def _aplicar_formato(ruta: Path) -> None:
 
                 header_name = str(ws.cell(row=1, column=idx + 1).value or '') if nombre_hoja == 'Anexar1' else ''
 
+                # Columnas de clasificación de diferencias: centrar y colorear la X
+                if nombre_hoja == 'Anexar1' and header_name in _COLORES_CLASIF:
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                    if cell.value == 'X':
+                        cell.font = Font(bold=True, color=_COLORES_CLASIF[header_name], size=11)
+                    continue
+
                 if es_sin_monto:
                     # Fondo rosado muy claro con texto gris para filas sin monto
                     cell.fill = PatternFill('solid', fgColor='F4CCFF')  # Violáceo muy claro
@@ -1131,12 +1213,12 @@ def _aplicar_formato(ruta: Path) -> None:
 def _ocultar_columnas_tecnicas(ruta: Path) -> None:
     """
     Oculta en la hoja Anexar1 las columnas técnicas que no necesita ver el especialista.
-    Se ocultan: Banco - Fecha, Conta - Fecha, TIPO, CODIGO, DIF COMISON, # Operación2
-    Se mantienen visibles las columnas operativas del especialista.
+    Se ocultan: Banco - Fecha, Conta - Fecha, TIPO, CODIGO, # Operación2
+    DIF COMISON se mantiene visible para que el especialista pueda ver la diferencia.
     """
     COLS_OCULTAR = {
         'Banco - Fecha', 'Conta - Fecha', 'TIPO', 'CODIGO',
-        '# Operación2', 'DIF COMISON'
+        '# Operación2'
     }
 
     wb = openpyxl.load_workbook(ruta)
