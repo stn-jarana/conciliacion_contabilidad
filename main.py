@@ -133,7 +133,7 @@ def _mes_anio_desde_inicial(ruta_inicial: Path) -> str:
 
 EMPRESAS = [
     {
-        "nombre"  : "Southern Textil Network (STN)",
+        "nombre"  : "STN",
         "ruc"     : "20376729126",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": ("STN DOL", "STN USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
@@ -141,7 +141,7 @@ EMPRESAS = [
         ],
     },
     {
-        "nombre"  : "Integrated Textile Solutions (ITS)",
+        "nombre"  : "ITS",
         "ruc"     : "20601910603",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": ("ITS DOL", "ITS USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
@@ -149,7 +149,7 @@ EMPRESAS = [
         ],
     },
     {
-        "nombre"  : "CMT del Sur",
+        "nombre"  : "CMT",
         "ruc"     : "20537658471",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": ("CMT DOL", "CMT USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
@@ -180,7 +180,7 @@ EMPRESAS = [
         ],
     },
     {
-        "nombre"  : "Inversiones Forestales del Sur (INFOSUR)",
+        "nombre"  : "INFOSUR",
         "ruc"     : "20600567890",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": ("INFOSUR DOL", "INFOSUR USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
@@ -195,14 +195,14 @@ EMPRESAS = [
         ],
     },
     {
-        "nombre"  : "Reforestadora Iñaupari",
+        "nombre"  : "Iñaupari",
         "ruc"     : "20601345678",
         "monedas" : [
             {"nombre": "Soles (PEN)",   "sheet_bank": ("REF. IÑAPARI", "REF. IÑAPARI SOLES"),  "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
-        "nombre"  : "TECA Peruvian Group",
+        "nombre"  : "TECA",
         "ruc"     : "20601456789",
         "monedas" : [
             {"nombre": "Soles (PEN)",   "sheet_bank": ("TECA", "TECA SOLES"),        "skip_bank": 4, "skip_conta": 11, "habilitado": True},
