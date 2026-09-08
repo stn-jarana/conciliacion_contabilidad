@@ -423,6 +423,7 @@ def flujo_reporte_inicial(config: dict) -> None:
         conta['nro_registro'].notna() &
         ~conta['nro_registro'].astype(str).str.startswith('Saldo', na=False) &
         ~conta['nro_registro'].astype(str).str.contains('Registro|N°|No|Nro', case=False, na=False) &
+        ~conta['nro_registro'].astype(str).str.contains(r'Informaci[oó]n\s+anterior', case=False, na=False) &
         ~conta['fecha_mov'].astype(str).str.contains('Fecha', case=False, na=False)
     ]
     conta['fecha_mov']          = pd.to_datetime(conta['fecha_mov'],          dayfirst=True, errors='coerce')
@@ -435,6 +436,30 @@ def flujo_reporte_inicial(config: dict) -> None:
     conta['conciliado'] = conta['conciliado'].str.upper().str.strip().map({'SI': True, 'NO': False})
     for col in ['giro', 'glosa', 'medio_pago']:
         conta[col] = conta[col].str.strip()
+
+    # ── Filtrar registros de meses anteriores ("Información anterior") ─────
+    # El mes de referencia lo determinamos a partir del banco ya sanitizado.
+    # Solo se conservan registros cuya fecha_mov pertenezca al mismo mes y año.
+    try:
+        fechas_banco = pd.to_datetime(bank['fecha'], errors='coerce').dropna()
+        if not fechas_banco.empty:
+            mes_ref  = fechas_banco.iloc[0].month
+            anio_ref = fechas_banco.iloc[0].year
+            filas_antes = len(conta)
+            conta = conta[
+                conta['fecha_mov'].isna() |  # mantener filas sin fecha (se descartan luego)
+                (
+                    (conta['fecha_mov'].dt.month == mes_ref) &
+                    (conta['fecha_mov'].dt.year  == anio_ref)
+                )
+            ]
+            filas_descartadas = filas_antes - len(conta)
+            if filas_descartadas > 0:
+                print(f"  [INFO] Se omitieron {filas_descartadas} registro(s) de contabilidad "
+                      f"fuera del período {mes_ref:02d}/{anio_ref} (sección 'Información anterior').")
+    except Exception:
+        pass  # Si falla el filtro por mes, continuar sin él
+
     conta = conta.sort_values('fecha_mov').reset_index(drop=True)
 
     # ── Generar reporte ───────────────────────────────────────────────

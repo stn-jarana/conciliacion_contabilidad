@@ -946,6 +946,22 @@ def _actualizar_hoja_conciliacion_final(
     ws['H13'] = saldos['saldo_libro_bancos']
     ws['H49'] = saldos['saldo_extracto']
 
+    # Helper: elimina completamente el valor de una celda desde el dict interno de openpyxl.
+    # cell.value = None no basta cuando la celda ya existía en la plantilla con datos.
+    def _borrar_celda(ws_obj, fila, col):
+        cell = ws_obj.cell(row=fila, column=col)
+        cell.value = None
+        coord = cell.coordinate
+        if coord in ws_obj._cells:
+            del ws_obj._cells[coord]
+
+    def _escribir_o_borrar(ws_obj, fila, col, valor):
+        """Escribe valor si no es None/vacío, de lo contrario borra la celda."""
+        if valor is not None and str(valor).strip() not in ('', 'nan'):
+            ws_obj.cell(row=fila, column=col, value=valor)
+        else:
+            _borrar_celda(ws_obj, fila, col)
+
     # 3. Limpiar ítems de ejemplo anteriores y colocar las partidas de la conciliación
     # - Cargos Libros no Extracto (Filas 19-22)
     cargos_lib = partidas.get('cargos_lib_no_ext', [])
@@ -957,15 +973,14 @@ def _actualizar_hoja_conciliacion_final(
                 fecha_str = fecha_val.strftime('%d/%m/%Y')
             else:
                 fecha_str = str(fecha_val) if fecha_val else ''
-            ws.cell(row=r, column=3, value=fecha_str)
-            ws.cell(row=r, column=4, value=p.get('registro') or p.get('operacion'))
-            ws.cell(row=r, column=5, value=p.get('descripcion'))
-            ws.cell(row=r, column=7, value=p.get('monto'))
+            _escribir_o_borrar(ws, r, 3, fecha_str)
+            _escribir_o_borrar(ws, r, 4, p.get('registro') or p.get('operacion'))
+            _escribir_o_borrar(ws, r, 5, p.get('descripcion'))
+            _borrar_celda(ws, r, 6)
+            _escribir_o_borrar(ws, r, 7, p.get('monto'))
         else:
-            ws.cell(row=r, column=3, value=None)
-            ws.cell(row=r, column=4, value=None)
-            ws.cell(row=r, column=5, value=None)
-            ws.cell(row=r, column=7, value=None)
+            for col in (3, 4, 5, 6, 7):
+                _borrar_celda(ws, r, col)
 
     # - Abonos Extracto no Libros (Filas 26-34)
     abonos_ext = partidas.get('abonos_ext_no_lib', [])
@@ -977,13 +992,14 @@ def _actualizar_hoja_conciliacion_final(
                 fecha_str = fecha_val.strftime('%d/%m/%Y')
             else:
                 fecha_str = str(fecha_val) if fecha_val else ''
-            ws.cell(row=r, column=3, value=fecha_str)
-            ws.cell(row=r, column=5, value=p.get('descripcion'))
-            ws.cell(row=r, column=7, value=p.get('monto'))
+            _escribir_o_borrar(ws, r, 3, fecha_str)
+            _borrar_celda(ws, r, 4)
+            _escribir_o_borrar(ws, r, 5, p.get('descripcion'))
+            _borrar_celda(ws, r, 6)
+            _escribir_o_borrar(ws, r, 7, p.get('monto'))
         else:
-            ws.cell(row=r, column=3, value=None)
-            ws.cell(row=r, column=5, value=None)
-            ws.cell(row=r, column=7, value=None)
+            for col in (3, 4, 5, 6, 7):
+                _borrar_celda(ws, r, col)
 
     # - Cargos Extracto no Libros (Filas 38-39)
     cargos_ext = partidas.get('cargos_ext_no_lib', [])
@@ -995,13 +1011,35 @@ def _actualizar_hoja_conciliacion_final(
                 fecha_str = fecha_val.strftime('%d/%m/%Y')
             else:
                 fecha_str = str(fecha_val) if fecha_val else ''
-            ws.cell(row=r, column=3, value=fecha_str)
-            ws.cell(row=r, column=5, value=p.get('descripcion'))
-            ws.cell(row=r, column=7, value=p.get('monto'))
+            _escribir_o_borrar(ws, r, 3, fecha_str)
+            _borrar_celda(ws, r, 4)
+            _escribir_o_borrar(ws, r, 5, p.get('descripcion'))
+            _borrar_celda(ws, r, 6)
+            _escribir_o_borrar(ws, r, 7, p.get('monto'))
         else:
-            ws.cell(row=r, column=3, value=None)
-            ws.cell(row=r, column=5, value=None)
-            ws.cell(row=r, column=7, value=None)
+            for col in (3, 4, 5, 6, 7):
+                _borrar_celda(ws, r, col)
+
+    # - Cheques girados y no cobrados (Filas 43-47)
+    # Partidas de conta sin par bancario. Se limpian siempre para evitar que
+    # datos históricos hardcodeados de la plantilla persistan en el reporte.
+    cheques_girados = partidas.get('cheques_girados_no_cobrados', [])
+    for idx, r in enumerate(range(43, 48)):
+        if idx < len(cheques_girados):
+            p = cheques_girados[idx]
+            fecha_val = p['fecha']
+            if isinstance(fecha_val, datetime):
+                fecha_str = fecha_val.strftime('%d/%m/%Y')
+            else:
+                fecha_str = str(fecha_val) if fecha_val else ''
+            _escribir_o_borrar(ws, r, 3, fecha_str)
+            _escribir_o_borrar(ws, r, 4, p.get('registro') or p.get('operacion'))
+            _escribir_o_borrar(ws, r, 5, p.get('descripcion'))
+            _borrar_celda(ws, r, 6)
+            _escribir_o_borrar(ws, r, 7, p.get('monto'))
+        else:
+            for col in (3, 4, 5, 6, 7):
+                _borrar_celda(ws, r, col)
 
     # Asegurar que las fórmulas de totales sigan intactas
     ws['H16'] = 0
