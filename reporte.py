@@ -170,6 +170,14 @@ def _preparar_tab_contanet(conta: pd.DataFrame) -> pd.DataFrame:
 
 from itertools import combinations
 
+
+def _diferencias_comision(moneda: str) -> set[float]:
+    """Importes de comisión válidos para la moneda conciliada."""
+    if "Soles" in moneda or "PEN" in moneda:
+        return {10.50, 69.00, 4.30, 29.00}
+    return {1.53, 82.00, 94.00, 69.00, 29.00}
+
+
 def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, moneda: str = "Dolares (USD)"):
     """
     Algoritmo de conciliación automática con las reglas:
@@ -180,6 +188,7 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
     """
     banco_ext['_matched'] = False
     conta_ext['_matched'] = False
+    diferencias_set = _diferencias_comision(moneda)
 
     # Excluir de la conciliación los movimientos de Contanet sin monto (ingreso=0 y egreso=0)
     # Se identifican porque tienen Monto-Conta == 0 y la anotación 'Mov. sin monto (0)'
@@ -213,8 +222,10 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             banco_ext.at[b_idx, 'Anotación'] = 'Auto: Código igual'
             conta_ext.at[c_idx, 'Anotación'] = 'Auto: Código igual'
 
-    # 1.2 Código igual pero monto diferente (diferencia > 0.01) → Sugerencia para validación
-    # Caso: banco='232946' monto=-364.7 | conta='232946' monto=-363.7 → dif=1.00
+    # 1.2 Código igual pero monto diferente (diferencia > 0.01).
+    # Solo se sugiere si la diferencia corresponde a una comisión conocida.
+    # Caso contrario, la pareja queda como observación y no puede ser tomada
+    # por reglas posteriores de sugerencia.
     if '_suggested' not in conta_ext.columns:
         conta_ext['_suggested'] = False
     for b_idx, row_b in banco_ext.iterrows():
@@ -236,13 +247,26 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             c_idx = candidates.index[0]
             m_c = float(conta_ext.at[c_idx, 'Monto-Conta'] or 0)
             dif = round(abs(m_b - m_c), 2)
-            op_link = f"SUG-COD-DIF-{op_b}"
-            banco_ext.at[b_idx, '# Operación2'] = op_link
-            conta_ext.at[c_idx, '# Operación2'] = op_link
-            anot = f"Sugerido: Código igual, diferencia de monto {dif}"
-            banco_ext.at[b_idx, 'Anotación'] = anot
-            conta_ext.at[c_idx, 'Anotación'] = anot
-            conta_ext.at[c_idx, '_suggested'] = True
+
+            if dif in diferencias_set:
+                op_link = f"SUG-COD-COM-{op_b}"
+                banco_ext.at[b_idx, '# Operación2'] = op_link
+                conta_ext.at[c_idx, '# Operación2'] = op_link
+                anot = f"Sugerido: Código igual, comisión {dif:.2f}"
+                banco_ext.at[b_idx, 'Anotación'] = anot
+                conta_ext.at[c_idx, 'Anotación'] = anot
+                conta_ext.at[c_idx, '_suggested'] = True
+            else:
+                op_link = f"OBS-COD-DIF-{op_b}"
+                banco_ext.at[b_idx, '# Operación2'] = op_link
+                conta_ext.at[c_idx, '# Operación2'] = op_link
+                anot = f"Observación: Código igual, diferencia de monto {dif:.2f}"
+                banco_ext.at[b_idx, 'Anotación'] = anot
+                conta_ext.at[c_idx, 'Anotación'] = anot
+                # Se excluyen de reglas posteriores, pero sin MAR='X': siguen
+                # visibles como movimientos no conciliados para revisión.
+                banco_ext.at[b_idx, '_matched'] = True
+                conta_ext.at[c_idx, '_matched'] = True
 
     # 1.5 # Operación de Conta contenido en Descripción de Banco + Monto igual
     for c_idx, row_c in conta_ext.iterrows():
@@ -406,12 +430,6 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             banco_ext.at[b_idx, 'Anotación'] = anot
             conta_ext.at[c_idx, 'Anotación'] = anot
             conta_ext.at[c_idx, '_suggested'] = True
-
-    # Definir diferencias según la moneda elegida
-    if "Soles" in moneda or "PEN" in moneda:
-        diferencias_set = {10.50, 69.00, 4.30, 29.00}
-    else:
-        diferencias_set = {1.53, 82.00, 94.00, 69.00, 29.00}
 
     diferencias = diferencias_set.union({0.0})
     if '_suggested' not in conta_ext.columns:
@@ -876,19 +894,26 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
     anexar['# Operación a Conciliar'] = ''
     anexar['Anotación-Conta'] = ''
 
-    # ── Calcular DIF COMISON real en pares sugeridos ──────────────────
+    # ── Calcular DIF COMISON real en pares sugeridos y de Observación ──
     # Para pares 1-a-N: DIF = monto_banco - suma(montos_conta), en la fila banco.
     # Para pares N-a-1: DIF = suma(montos_banco) - monto_conta, en la fila conta.
-    # En los demás casos (1-a-1 sugerido): DIF = monto_banco - monto_conta, en la fila banco.
+    # En los demás casos (1-a-1): DIF = monto_banco - monto_conta, en la fila banco.
     # Las filas del lado "múltiple" siempre quedan con DIF COMISON = 0.
-    mask_sugeridos = anexar['Anotación'].astype(str).str.startswith('Sugerido:')
-    if mask_sugeridos.any():
-        grupos_sug = anexar.loc[mask_sugeridos, '# Operación2'].dropna().unique()
-        for op2 in grupos_sug:
-            if not str(op2).strip() or str(op2) == 'nan':
+    # Se incluyen también los pares de Observación (OBS-COD-DIF-*) para que
+    # la diferencia quede registrada en la fila banco y las columnas de
+    # clasificación se calculen correctamente después.
+    mask_con_dif = (
+        anexar['Anotación'].astype(str).str.startswith('Sugerido:') |
+        anexar['Anotación'].astype(str).str.startswith('Observación:')
+    )
+    if mask_con_dif.any():
+        grupos_dif = anexar.loc[mask_con_dif, '# Operación2'].dropna().unique()
+        for op2 in grupos_dif:
+            op2_str = str(op2).strip()
+            if not op2_str or op2_str == 'nan':
                 continue
             idxs = anexar.index[
-                mask_sugeridos & (anexar['# Operación2'].astype(str) == str(op2))
+                mask_con_dif & (anexar['# Operación2'].astype(str) == op2_str)
             ].tolist()
             idx_banco = [i for i in idxs if pd.notna(anexar.at[i, 'Monto-Banco'])]
             idx_conta = [i for i in idxs if pd.notna(anexar.at[i, 'Monto-Conta'])]
@@ -918,9 +943,10 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
     # ── 4 columnas de clasificación de diferencias ────────────────────
     # Se calculan DESPUÉS de DIF COMISON para que Comisiones refleje el valor real.
     # ITF        → descripción banco contiene 'ITF'
-    # Comisiones → DIF COMISON != 0 (diferencia de comisión bancaria)
-    # Error      → Anotación indica diferencia de monto con mismo código
+    # Comisiones → DIF COMISON != 0 Y la diferencia es una comisión conocida
+    # Error      → par de Observación (diferencia que NO es comisión) solo en fila banco
     # Otros      → vacío (el especialista marca si aplica)
+    _difs_comision = _diferencias_comision(moneda)
 
     def _marcar_itf(row):
         desc = str(row.get('Banco - Descripción', '') or '')
@@ -933,16 +959,31 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
             return ''
         dif = row.get('DIF COMISON')
         try:
-            return 'X' if dif is not None and float(dif) != 0.0 else ''
+            dif_f = float(dif) if dif is not None else 0.0
         except (ValueError, TypeError):
             return ''
+        if dif_f == 0.0:
+            return ''
+        # Solo marcar como comisión si el valor absoluto corresponde a una comisión conocida
+        return 'X' if round(abs(dif_f), 2) in _difs_comision else ''
 
     def _marcar_error(row):
         anot = str(row.get('Anotación', '') or '')
-        # Diferencia de monto con mismo código operación (error contable/bancario)
-        if 'diferencia de monto' in anot.lower():
-            return 'X'
-        return ''
+        # Solo aplica a pares de Observación (diferencia de monto con mismo código)
+        if 'diferencia de monto' not in anot.lower():
+            return ''
+        # Solo en la fila banco (tiene Monto-Banco), no en la fila conta
+        if not pd.notna(row.get('Monto-Banco')):
+            return ''
+        # Si la diferencia ya está capturada como comisión conocida, no es error
+        dif = row.get('DIF COMISON')
+        try:
+            dif_f = float(dif) if dif is not None else 0.0
+        except (ValueError, TypeError):
+            dif_f = 0.0
+        if round(abs(dif_f), 2) in _difs_comision:
+            return ''
+        return 'X'
 
     anexar['ITF']        = anexar.apply(_marcar_itf, axis=1)
     anexar['Comisiones'] = anexar.apply(_marcar_comisiones, axis=1)

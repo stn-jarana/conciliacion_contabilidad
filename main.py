@@ -137,7 +137,7 @@ EMPRESAS = [
         "ruc"     : "20376729126",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": ("STN DOL", "STN USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": ("STN SOL", "STN SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
@@ -145,7 +145,7 @@ EMPRESAS = [
         "ruc"     : "20601910603",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": ("ITS DOL", "ITS USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "ITS SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": ("ITS SOL", "ITS SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
@@ -153,7 +153,7 @@ EMPRESAS = [
         "ruc"     : "20537658471",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": ("CMT DOL", "CMT USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "CMT SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": ("CMT SOL", "CMT SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
@@ -161,7 +161,7 @@ EMPRESAS = [
         "ruc"     : "20600995761",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": ("DYNAMITEX DOL", "DYNAMITEX USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "DYNAMITEX SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": ("DYNAMITEX SOL", "DYNAMITEX SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
@@ -169,14 +169,14 @@ EMPRESAS = [
         "ruc"     : "20603964571",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": ("DINSURA DOL", "DINSURA USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "DINSURA SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": ("DINSURA SOL", "DINSURA SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "Perú Commerce",
         "ruc"     : "20601234567",
         "monedas" : [
-            {"nombre": "Soles (PEN)",   "sheet_bank": "P.COMMERCE",   "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": ("P.COMMERCE", "P.COMMERCE SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
@@ -184,35 +184,35 @@ EMPRESAS = [
         "ruc"     : "20600567890",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": ("INFOSUR DOL", "INFOSUR USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
-            {"nombre": "Soles (PEN)",   "sheet_bank": "INFOSUR SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": ("INFOSUR SOL", "INFOSUR SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "Thimble Sourcing / TST",
         "ruc"     : "20601987654",
         "monedas" : [
-            {"nombre": "Soles (PEN)",   "sheet_bank": "TST",         "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": ("TST", "TST SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "Reforestadora Iñaupari",
         "ruc"     : "20601345678",
         "monedas" : [
-            {"nombre": "Soles (PEN)",   "sheet_bank": "REF. IÑAPARI",  "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": ("REF. IÑAPARI", "REF. IÑAPARI SOLES"),  "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "TECA Peruvian Group",
         "ruc"     : "20601456789",
         "monedas" : [
-            {"nombre": "Soles (PEN)",   "sheet_bank": "TECA",        "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": ("TECA", "TECA SOLES"),        "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "DIONISO",
         "ruc"     : "20601567890",
         "monedas" : [
-            {"nombre": "Soles (PEN)",   "sheet_bank": "INV. DIONISO",     "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": ("INV. DIONISO", "INV. DIONISO SOLES"),     "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
 ]
