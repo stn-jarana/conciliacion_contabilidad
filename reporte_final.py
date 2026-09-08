@@ -81,22 +81,29 @@ def generar_reporte_final(
         anexar1['MAR'] = ''
 
     # ── 1. PRIORIDAD ABSOLUTA: Vincular filas por códigos comunes (letras, números o combinaciones) ────────
-    col_op_conciliar = None
-    for posible_col in ['# Operación a Conciliar', 'No Conciliar', 'N° Asiento a conciliar', 'Conciliar']:
-        if posible_col in anexar1.columns:
-            col_op_conciliar = posible_col
-            break
+    # Se revisan todas las columnas que el usuario o el sistema puedan usar para vincular:
+    # 'Conciliar' (columna estándar donde el especialista pone 'A', 'B', etc.), '# Operación a Conciliar', etc.
+    cols_vinculacion = [c for c in ['Conciliar', '# Operación a Conciliar', 'No Conciliar', 'N° Asiento a conciliar'] if c in anexar1.columns]
 
-    if col_op_conciliar:
+    for col_vinculo in cols_vinculacion:
+        # Valores reservados que no representan un código manual de vinculación
+        valores_excluidos = {'', 'nan', 'none', '0'}
+        if col_vinculo == 'Conciliar':
+            # 'Conciliados' es para automáticos, 'X'/'SI'/'1' para sugerencias aprobadas (se procesan en paso 2)
+            valores_excluidos.update({'x', 'si', '1', 'conciliados'})
+
         # 1.a. Agrupar por códigos idénticos ingresados en la columna de vinculación
-        # Esto permite que el especialista escriba p.ej. 'A', 'REGLA1', 'X1', '123' tanto en filas de banco como de conta
-        mask_codigo = anexar1[col_op_conciliar].apply(
-            lambda v: pd.notna(v) and str(v).strip() not in ('', 'nan', '0')
+        # Permite que el especialista escriba p.ej. 'A', 'B', 'REGLA1', 'X1' tanto en banco como en conta
+        mask_codigo = anexar1[col_vinculo].apply(
+            lambda v: pd.notna(v) and str(v).strip().lower() not in valores_excluidos
         )
-        codigos_unicos = anexar1.loc[mask_codigo, col_op_conciliar].astype(str).str.strip().unique()
+        codigos_unicos = anexar1.loc[mask_codigo, col_vinculo].astype(str).str.strip().unique()
 
         for cod in codigos_unicos:
-            filas_cod = anexar1[anexar1[col_op_conciliar].astype(str).str.strip() == cod]
+            filas_cod = anexar1[
+                (anexar1[col_vinculo].astype(str).str.strip() == cod) &
+                (anexar1['MAR'] != 'X')
+            ]
             banco_idxs = filas_cod[filas_cod['Monto-Banco'].notna()].index.tolist()
             conta_idxs = filas_cod[filas_cod['Monto-Conta'].notna()].index.tolist()
 
@@ -113,40 +120,45 @@ def generar_reporte_final(
                     anexar1.at[c_i, '# Operación2'] = op_link
                     anexar1.at[c_i, 'Anotación'] = f"Vinc. Manual ({cod})"
 
+
         # 1.b. Buscar coincidencia cuando se ingresa el N° de Asiento / Operación del lado opuesto
-        mask_op_manual = anexar1[col_op_conciliar].apply(lambda v: pd.notna(v) and str(v).strip() not in ('', 'nan', '0'))
-        for idx_src in anexar1[mask_op_manual].index:
-            if anexar1.at[idx_src, 'MAR'] == 'X':
-                continue
-            val_target = str(anexar1.at[idx_src, col_op_conciliar]).strip()
-            es_banco_src = pd.notna(anexar1.at[idx_src, 'Monto-Banco'])
+        # Solo para columnas de operación específicas o filas que aún no tengan MAR == 'X'
+        if col_vinculo != 'Conciliar':
+            mask_op_manual = anexar1[col_vinculo].apply(
+                lambda v: pd.notna(v) and str(v).strip().lower() not in valores_excluidos
+            )
+            for idx_src in anexar1[mask_op_manual].index:
+                if anexar1.at[idx_src, 'MAR'] == 'X':
+                    continue
+                val_target = str(anexar1.at[idx_src, col_vinculo]).strip()
+                es_banco_src = pd.notna(anexar1.at[idx_src, 'Monto-Banco'])
 
-            if es_banco_src:
-                mask_target = anexar1['Monto-Conta'].notna() & (
-                    (anexar1['Conta - # Registro'].astype(str).str.strip() == val_target) |
-                    (anexar1['Conta - # Operación'].astype(str).str.strip() == val_target) |
-                    (anexar1['# Operación2'].astype(str).str.strip() == val_target)
-                )
-            else:
-                mask_target = anexar1['Monto-Banco'].notna() & (
-                    (anexar1['Banco - # Operación'].astype(str).str.strip() == val_target) |
-                    (anexar1['# Operación2'].astype(str).str.strip() == val_target)
-                )
+                if es_banco_src:
+                    mask_target = (anexar1['MAR'] != 'X') & anexar1['Monto-Conta'].notna() & (
+                        (anexar1['Conta - # Registro'].astype(str).str.strip() == val_target) |
+                        (anexar1['Conta - # Operación'].astype(str).str.strip() == val_target) |
+                        (anexar1['# Operación2'].astype(str).str.strip() == val_target)
+                    )
+                else:
+                    mask_target = (anexar1['MAR'] != 'X') & anexar1['Monto-Banco'].notna() & (
+                        (anexar1['Banco - # Operación'].astype(str).str.strip() == val_target) |
+                        (anexar1['# Operación2'].astype(str).str.strip() == val_target)
+                    )
 
-            matches_target = anexar1[mask_target]
-            if not matches_target.empty:
-                all_banco = [idx_src] if es_banco_src else list(matches_target.index)
-                all_conta = list(matches_target.index) if es_banco_src else [idx_src]
+                matches_target = anexar1[mask_target]
+                if not matches_target.empty:
+                    all_banco = [idx_src] if es_banco_src else list(matches_target.index)
+                    all_conta = list(matches_target.index) if es_banco_src else [idx_src]
 
-                op_link = f"MANUAL-{val_target}"
-                for b_i in all_banco:
-                    anexar1.at[b_i, 'MAR'] = 'X'
-                    anexar1.at[b_i, '# Operación2'] = op_link
-                    anexar1.at[b_i, 'Anotación'] = f"Manual por # Op ({val_target})"
-                for c_i in all_conta:
-                    anexar1.at[c_i, 'MAR'] = 'X'
-                    anexar1.at[c_i, '# Operación2'] = op_link
-                    anexar1.at[c_i, 'Anotación'] = f"Manual por # Op ({val_target})"
+                    op_link = f"MANUAL-{val_target}"
+                    for b_i in all_banco:
+                        anexar1.at[b_i, 'MAR'] = 'X'
+                        anexar1.at[b_i, '# Operación2'] = op_link
+                        anexar1.at[b_i, 'Anotación'] = f"Manual por # Op ({val_target})"
+                    for c_i in all_conta:
+                        anexar1.at[c_i, 'MAR'] = 'X'
+                        anexar1.at[c_i, '# Operación2'] = op_link
+                        anexar1.at[c_i, 'Anotación'] = f"Manual por # Op ({val_target})"
 
     # ── 2. Aprobar sugerencias si el especialista colocó una 'X' ÚNICAMENTE en la columna 'Conciliar' ─────────
     if 'Conciliar' in anexar1.columns and 'Anotación' in anexar1.columns:
@@ -211,7 +223,7 @@ def generar_reporte_final(
     )
 
     # ── Partidas de ajuste ───────────────────────────────────────────
-    partidas = _clasificar_partidas(banco_sin_marcar, conta_sin_marcar, anexar1)
+    partidas = _clasificar_partidas(banco_sin_marcar, conta_sin_marcar, anexar1, ruta_inicial=ruta_inicial)
 
     # ── Escribir Excel basado en Formato Propuesto.xlsx ─────────────────
     ruta_plantilla = Path("Formato Propuesto.xlsx")
@@ -257,7 +269,7 @@ def generar_reporte_final(
 
     # ── Pestañas adicionales: ITF Y COM, INGRESOS, EGRESOS, Anexar1 ──
     # El orden de llamada define el orden de las pestañas (antes de Anexar1).
-    _escribir_hoja_itf_com(ruta_salida, ruta_inicial, meta)
+    _escribir_hoja_itf_com(ruta_salida, ruta_inicial, meta, partidas=partidas)
     _escribir_hoja_ingresos(ruta_salida, ruta_inicial, meta)
     _escribir_hoja_egresos(ruta_salida, ruta_inicial, meta)
     # Copia exacta de la hoja Anexar1 del archivo inicial (siempre al final)
@@ -289,7 +301,33 @@ def _cruzar_marcados(
     usados_conta = set()
     usados_banco = set()
 
+    # 1. Emparejar por grupos de '# Operación2' compartidos (soporta 1-a-1, 1-a-N y N-a-1)
+    banco_op2 = banco_marcado['# Operación2'].astype(str).str.strip()
+    conta_op2 = conta_marcado['# Operación2'].astype(str).str.strip()
+
+    grupos_op2 = [
+        g for g in pd.unique(pd.concat([banco_op2, conta_op2]))
+        if g and g not in ('nan', '0', '')
+    ]
+
+    for op2_val in grupos_op2:
+        idxs_b = banco_marcado[banco_op2 == op2_val].index.tolist()
+        idxs_c = conta_marcado[conta_op2 == op2_val].index.tolist()
+
+        if idxs_b and idxs_c:
+            n = max(len(idxs_b), len(idxs_c))
+            for k in range(n):
+                rb = banco_marcado.loc[idxs_b[k]] if k < len(idxs_b) else pd.Series(dtype=object)
+                rc = conta_marcado.loc[idxs_c[k]] if k < len(idxs_c) else pd.Series(dtype=object)
+                filas.append(_fila_conciliada(rb, rc))
+
+            usados_banco.update(idxs_b)
+            usados_conta.update(idxs_c)
+
+    # 2. Emparejar filas restantes individuales
     for i, rb in banco_marcado.iterrows():
+        if i in usados_banco:
+            continue
         op2_b = str(rb.get('# Operación2', '')).strip()
         matched = False
 
@@ -357,17 +395,36 @@ def _fila_conciliada(rb: pd.Series, rc: pd.Series) -> dict:
     if anot_c and anot_c != anot_b:
         anotacion = f"{anot_b} | {anot_c}" if anot_b else anot_c
 
+    mb = rb.get('Monto-Banco') if pd.notna(rb.get('Monto-Banco')) else None
+    mc = rc.get('Monto-Conta') if pd.notna(rc.get('Monto-Conta')) else None
+
+    diff = (float(mb) if mb is not None else 0.0) - (float(mc) if mc is not None else 0.0)
+
+    # DIF COMISON: solo respetar un valor explícito previamente establecido en alguna de las filas.
+    # No usar la diferencia total diff como dif_com cuando no hay DIF COMISON previo,
+    # ya que vinculaciones manuales con montos dispares representan errores contables,
+    # no comisiones bancarias.
+    dif_com = 0.0
+    for r_cand in (rc, rb):
+        v = r_cand.get('DIF COMISON') if r_cand is not None else None
+        try:
+            if pd.notna(v) and float(v) != 0.0:
+                dif_com = float(v)
+                break
+        except (ValueError, TypeError):
+            pass
+
     return {
         'Fecha Banco'        : rb.get('Fecha'),
         'Descripcion Banco'  : rb.get('Banco - Descripción', ''),
-        'Monto-Banco'        : rb.get('Monto-Banco'),
+        'Monto-Banco'        : mb,
         '# Op. Banco'        : rb.get('Banco - # Operación', ''),
         'Fecha Conta'        : rc.get('Fecha'),
         '# Registro'         : rc.get('Conta - # Registro', ''),
-        'Monto-Conta'        : rc.get('Monto-Conta'),
-        'DIF COMISON'        : rc.get('DIF COMISON', 0),
-        'TIPO'               : rb.get('TIPO', ''),
-        'Diferencia'         : (rb.get('Monto-Banco', 0) or 0) - (rc.get('Monto-Conta', 0) or 0),
+        'Monto-Conta'        : mc,
+        'DIF COMISON'        : dif_com,
+        'TIPO'               : rb.get('TIPO', '') or rc.get('TIPO', ''),
+        'Diferencia'         : diff,
         'Anotación'          : anotacion,
     }
 
@@ -490,14 +547,16 @@ def _clasificar_partidas(
     banco_sin_marcar: pd.DataFrame,
     conta_sin_marcar: pd.DataFrame,
     anexar1: pd.DataFrame,
+    ruta_inicial: Path | None = None,
 ) -> dict:
     """
     Clasifica las partidas abiertas según el formato propuesto:
       - Abonos en Libros no en Extracto  (conta_sin_marcar con monto positivo)
-      - Cargos en Libros no en Extracto  (conta_sin_marcar con monto negativo)
+      - Cargos en Libros no en Extracto  (conta_sin_marcar con monto negativo)  ← signo INVERTIDO al mostrar
       - Abonos en Extracto no en Libros  (banco_sin_marcar con monto positivo)
       - Cargos en Extracto no en Libros  (banco_sin_marcar con monto negativo)
-      - Cheques girados no cobrados       (partidas de conta marcadas como cheques)
+      - itf_banco                         (filas con columna ITF='X' y DIF COMISON ≠ 0)
+      - comisiones_banco                  (filas con columna Comisiones='X' y DIF COMISON ≠ 0)
     """
 
     def _desc_conta(row) -> str:
@@ -564,9 +623,11 @@ def _clasificar_partidas(
         conta_sin_marcar, 'Monto-Conta', 'Fecha',
         'Conta - Glosa', 'Conta - # Operación', positivo=True, es_conta=True
     )
+    # Cargos en Libros: montos negativos en conta → se muestran con signo INVERTIDO (positivos)
+    # porque en el formato de conciliación suman al saldo libro bancos.
     cargos_lib_no_ext = to_lista(
         conta_sin_marcar, 'Monto-Conta', 'Fecha',
-        'Conta - Glosa', 'Conta - # Operación', positivo=False, es_conta=True, invertir_signo=False, mantener_signo=True
+        'Conta - Glosa', 'Conta - # Operación', positivo=False, es_conta=True, invertir_signo=True, mantener_signo=False
     )
 
     # Partidas bancarias sin par contable
@@ -589,6 +650,199 @@ def _clasificar_partidas(
         'Conta - Glosa', 'Conta - # Operación', es_conta=True
     )
 
+    # ── Extraer ITF, Comisiones, Error y Otros desde Anexar1 ────────────
+    # Se capturan tanto las vinculaciones manuales (códigos 'A', 'B', etc.)
+    # como los pares sugeridos/auto-conciliados y filas individuales clasificadas.
+    itf_banco        = []
+    comisiones_banco = []
+    error_banco      = []
+    otros_banco      = []
+
+    # Fuente: el DataFrame anexar1 ya cargado y procesado con vinculaciones manuales
+    df_anexar_src = anexar1
+    if (df_anexar_src is None or df_anexar_src.empty) and ruta_inicial and Path(ruta_inicial).exists():
+        try:
+            xl = pd.ExcelFile(ruta_inicial)
+            if 'Anexar1' in xl.sheet_names:
+                df_anexar_src = pd.read_excel(ruta_inicial, sheet_name='Anexar1')
+                df_anexar_src.columns = [str(c).strip() for c in df_anexar_src.columns]
+        except Exception:
+            pass
+
+    col_itf   = 'ITF'        if 'ITF'        in df_anexar_src.columns else None
+    col_com   = 'Comisiones' if 'Comisiones' in df_anexar_src.columns else None
+    col_err   = 'Error'      if 'Error'      in df_anexar_src.columns else None
+    col_otr   = 'Otros'      if 'Otros'      in df_anexar_src.columns else None
+    col_dif   = 'DIF COMISON' if 'DIF COMISON' in df_anexar_src.columns else None
+    col_desc  = 'Banco - Descripción' if 'Banco - Descripción' in df_anexar_src.columns else None
+    col_fecha = 'Fecha' if 'Fecha' in df_anexar_src.columns else None
+    col_op    = 'Banco - # Operación' if 'Banco - # Operación' in df_anexar_src.columns else None
+
+    def _texto(valor) -> str:
+        if valor is None or pd.isna(valor):
+            return ''
+        texto = str(valor).strip()
+        return '' if texto.lower() == 'nan' else texto
+
+    def _monto(valor) -> float:
+        try:
+            return 0.0 if valor is None or pd.isna(valor) else float(valor)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _marcado(fila, columna) -> bool:
+        return bool(columna and columna in fila and _texto(fila.get(columna)).upper() == 'X')
+
+    # 1. Identificar grupos de vinculación manual
+    grupos_manual: dict[str, list[int]] = {}
+    valores_excluidos = {'x', 'si', '1', 'conciliados', '', 'nan'}
+
+    for idx, row in df_anexar_src.iterrows():
+        op2 = _texto(row.get('# Operación2'))
+        if op2.startswith('MANUAL-'):
+            grupos_manual.setdefault(op2, []).append(idx)
+        else:
+            for c_vinc in ['Conciliar', '# Operación a Conciliar']:
+                if c_vinc in df_anexar_src.columns:
+                    cod = _texto(row.get(c_vinc))
+                    if cod and cod.lower() not in valores_excluidos:
+                        grupos_manual.setdefault(f"COD-{cod}", []).append(idx)
+                        break
+
+    indices_en_grupo = set()
+
+    for cod_grupo, idxs in grupos_manual.items():
+        filas_grupo = [df_anexar_src.loc[i] for i in idxs]
+        banco_filas = [r for r in filas_grupo if pd.notna(r.get('Monto-Banco'))]
+        conta_filas = [r for r in filas_grupo if pd.notna(r.get('Monto-Conta'))]
+
+        if not banco_filas or not conta_filas:
+            continue
+
+        indices_en_grupo.update(idxs)
+
+        total_b = sum(_monto(r.get('Monto-Banco')) for r in banco_filas)
+        total_c = sum(_monto(r.get('Monto-Conta')) for r in conta_filas)
+        dif_grupo = round(total_b - total_c, 2)
+
+        # Si alguna fila del grupo tiene un DIF COMISON explícito no cero, respetarlo
+        dif_exp = None
+        if col_dif:
+            for r in filas_grupo:
+                v = r.get(col_dif)
+                try:
+                    if pd.notna(v) and float(v) != 0.0:
+                        dif_exp = float(v)
+                        break
+                except (ValueError, TypeError):
+                    pass
+
+        monto_final = dif_exp if dif_exp is not None else dif_grupo
+
+        es_itf = any(_marcado(r, col_itf) for r in filas_grupo)
+        es_com = any(_marcado(r, col_com) for r in filas_grupo)
+        es_err = any(_marcado(r, col_err) for r in filas_grupo)
+        es_otr = any(_marcado(r, col_otr) for r in filas_grupo)
+
+        # Si no se marcó ninguna clasificación, no debe fluir a ninguna pestaña de ajuste
+        if not (es_itf or es_com or es_err or es_otr):
+            continue
+
+        fila_rep = banco_filas[0] if banco_filas else filas_grupo[0]
+        f_raw = fila_rep.get(col_fecha) if col_fecha else None
+        fecha_val = pd.to_datetime(f_raw, dayfirst=True, errors='coerce') if f_raw is not None else None
+        if pd.isna(fecha_val) or fecha_val is None:
+            f_alt = fila_rep.get('Banco - Fecha') or fila_rep.get('Conta - Fecha')
+            fecha_val = pd.to_datetime(f_alt, dayfirst=True, errors='coerce')
+
+        desc_val = _texto(fila_rep.get(col_desc)) if col_desc else ''
+        if not desc_val:
+            desc_val = _texto(fila_rep.get('Conta - Glosa')) or _texto(fila_rep.get('Conta - Giro'))
+        op_val = _texto(fila_rep.get(col_op)) if col_op else ''
+        if not op_val:
+            op_val = _texto(fila_rep.get('Conta - # Operación')) or _texto(fila_rep.get('# Operación2'))
+        if op_val.endswith('.0'):
+            op_val = op_val[:-2]
+
+        partida = {
+            'fecha'      : fecha_val.to_pydatetime() if fecha_val is not None and pd.notna(fecha_val) else None,
+            'operacion'  : op_val,
+            'descripcion': desc_val,
+            'monto'      : monto_final,
+        }
+
+        if es_itf:
+            itf_banco.append(partida)
+        elif es_com:
+            comisiones_banco.append(partida)
+        elif es_err:
+            error_banco.append(partida)
+        elif es_otr:
+            otros_banco.append(partida)
+
+    # 2. Filas individuales / sugerencias automáticas fuera de grupos manuales
+    for idx, row in df_anexar_src.iterrows():
+        if idx in indices_en_grupo:
+            continue
+
+        es_itf = _marcado(row, col_itf)
+        es_com = _marcado(row, col_com)
+        es_err = _marcado(row, col_err)
+        es_otr = _marcado(row, col_otr)
+
+        if not (es_itf or es_com or es_err or es_otr):
+            continue
+
+        dif_raw = row.get(col_dif) if col_dif else None
+        try:
+            dif = float(dif_raw) if pd.notna(dif_raw) and str(dif_raw) not in ('', 'nan') else 0.0
+        except (ValueError, TypeError):
+            dif = 0.0
+
+        if dif != 0.0:
+            monto = dif
+        else:
+            mb = _monto(row.get('Monto-Banco'))
+            mc = _monto(row.get('Monto-Conta'))
+            if mb != 0.0 and mc != 0.0:
+                monto = round(mb - mc, 2)
+            else:
+                monto = mb if mb != 0.0 else mc
+
+        if monto == 0.0:
+            continue
+
+        f_raw = row.get(col_fecha) if col_fecha else None
+        fecha_val = pd.to_datetime(f_raw, dayfirst=True, errors='coerce') if f_raw is not None else None
+        if pd.isna(fecha_val) or fecha_val is None:
+            f_alt = row.get('Banco - Fecha') or row.get('Conta - Fecha')
+            fecha_val = pd.to_datetime(f_alt, dayfirst=True, errors='coerce')
+
+        desc_val = _texto(row.get(col_desc)) if col_desc else ''
+        if not desc_val:
+            desc_val = _texto(row.get('Conta - Glosa')) or _texto(row.get('Conta - Giro'))
+        op_val = _texto(row.get(col_op)) if col_op else ''
+        if not op_val:
+            op_val = _texto(row.get('Conta - # Operación')) or _texto(row.get('# Operación2'))
+        if op_val.endswith('.0'):
+            op_val = op_val[:-2]
+
+        partida = {
+            'fecha'      : fecha_val.to_pydatetime() if fecha_val is not None and pd.notna(fecha_val) else None,
+            'operacion'  : op_val,
+            'descripcion': desc_val,
+            'monto'      : monto,
+        }
+
+        if es_itf:
+            itf_banco.append(partida)
+        elif es_com:
+            comisiones_banco.append(partida)
+        elif es_err:
+            error_banco.append(partida)
+        elif es_otr:
+            otros_banco.append(partida)
+
     return {
         'abonos_lib_no_ext' : abonos_lib_no_ext,
         'cargos_lib_no_ext' : cargos_lib_no_ext,
@@ -596,6 +850,10 @@ def _clasificar_partidas(
         'cargos_ext_no_lib' : cargos_ext_no_lib,
         'solo_banco'        : solo_banco_todas,
         'solo_conta'        : solo_conta_todas,
+        'itf_banco'         : itf_banco,
+        'comisiones_banco'  : comisiones_banco,
+        'error_banco'       : error_banco,
+        'otros_banco'       : otros_banco,
     }
 
 
@@ -1127,6 +1385,64 @@ def _escribir_hoja_conciliacion_final(
     ws.row_dimensions[fila].height = 4
     fila += 1
 
+    # ── (-) COMISIONES EN BANCO ───────────────────────────────────────
+    _COLOR_COM_SEC = 'ED7D31'   # naranja
+    ws.row_dimensions[fila].height = 15
+    _c(ws, fila, 2, '(-) Comisiones en Banco',
+       bold=True, size=10, bg=_COLOR_COM_SEC, color=_COLOR_WHITE, border=_BORDE_THIN)
+    _merge(ws, fila, 2, fila, 6)
+    _c(ws, fila, 7, None, bg=_COLOR_COM_SEC, border=_BORDE_THIN)
+    total_com_banco = sum(p['monto'] for p in partidas.get('comisiones_banco', []))
+    _c(ws, fila, 8, total_com_banco if total_com_banco else 0, bold=True, size=10,
+       align_h='right', bg=_COLOR_COM_SEC, color=_COLOR_WHITE,
+       num_fmt='#,##0.00', border=_BORDE_THIN)
+    fila += 1
+
+    for p in partidas.get('comisiones_banco', []):
+        ws.row_dimensions[fila].height = 15
+        fecha_val = p['fecha']
+        if isinstance(fecha_val, datetime):
+            fecha_str = fecha_val.strftime('%d/%m/%Y')
+        else:
+            fecha_str = str(fecha_val) if fecha_val else ''
+        _c(ws, fila, 3, fecha_str, size=10, bold=True)
+        _c(ws, fila, 5, p['descripcion'], size=10, wrap=True)
+        _c(ws, fila, 7, p['monto'], size=10, align_h='right', num_fmt='#,##0.00')
+        fila += 1
+
+    # Fila espaciadora
+    ws.row_dimensions[fila].height = 4
+    fila += 1
+
+    # ── (-) ITF EN BANCO ──────────────────────────────────────────────
+    _COLOR_ITF_SEC = 'C00000'   # rojo oscuro
+    ws.row_dimensions[fila].height = 15
+    _c(ws, fila, 2, '(-) ITF en Banco',
+       bold=True, size=10, bg=_COLOR_ITF_SEC, color=_COLOR_WHITE, border=_BORDE_THIN)
+    _merge(ws, fila, 2, fila, 6)
+    _c(ws, fila, 7, None, bg=_COLOR_ITF_SEC, border=_BORDE_THIN)
+    total_itf_banco = sum(p['monto'] for p in partidas.get('itf_banco', []))
+    _c(ws, fila, 8, total_itf_banco if total_itf_banco else 0, bold=True, size=10,
+       align_h='right', bg=_COLOR_ITF_SEC, color=_COLOR_WHITE,
+       num_fmt='#,##0.00', border=_BORDE_THIN)
+    fila += 1
+
+    for p in partidas.get('itf_banco', []):
+        ws.row_dimensions[fila].height = 15
+        fecha_val = p['fecha']
+        if isinstance(fecha_val, datetime):
+            fecha_str = fecha_val.strftime('%d/%m/%Y')
+        else:
+            fecha_str = str(fecha_val) if fecha_val else ''
+        _c(ws, fila, 3, fecha_str, size=10, bold=True)
+        _c(ws, fila, 5, p['descripcion'], size=10, wrap=True)
+        _c(ws, fila, 7, p['monto'], size=10, align_h='right', num_fmt='#,##0.00')
+        fila += 1
+
+    # Fila espaciadora
+    ws.row_dimensions[fila].height = 4
+    fila += 1
+
     # ══════════════════════════════════════════════════════════════════
     # SALDO SEGÚN EXTRACTO BANCARIO
     # ══════════════════════════════════════════════════════════════════
@@ -1154,12 +1470,26 @@ def _escribir_hoja_conciliacion_final(
     # SALDO CONCILIADO
     # ══════════════════════════════════════════════════════════════════
     ws.row_dimensions[fila].height = 15
+    # El saldo conciliado es la diferencia entre el saldo libros ajustado y el
+    # saldo extracto. Debe tender a 0 cuando la conciliación es perfecta.
+    # Equivale a la fórmula de plantilla: H13 - H16 + H18 + H24 - H36 + H41 - H49
+    #
+    # Convención de signos de cada lista:
+    #   abonos_lib_no_ext  → positivos  (conta +)      → restar del saldo libros
+    #   cargos_lib_no_ext  → positivos  (conta -, invertido) → sumar al saldo libros
+    #   abonos_ext_no_lib  → positivos  (banco +)       → sumar al saldo libros
+    #   cargos_ext_no_lib  → negativos  (banco -, original)  → sumar (ya negativos, reduce)
+    #   comisiones_banco   → negativos  (DIF COMISON, original) → sumar (ya negativos, reduce)
+    #   itf_banco          → negativos  (DIF COMISON, original) → sumar (ya negativos, reduce)
     saldo_conciliado = round(
         saldo_libros
         - total_ab_lib
         + total_cg_lib
         + total_ab_ext
-        - total_cg_ext,
+        + total_cg_ext
+        + total_com_banco
+        + total_itf_banco
+        - saldo_extracto,
         2
     )
     _c(ws, fila, 5, 'Saldo Conciliado', bold=True, size=11,
@@ -1446,8 +1776,11 @@ def _copiar_anexar1(ruta_inicial: Path, ruta_final: Path) -> None:
         for merged_range in ws_src.merged_cells.ranges:
             ws_dst.merge_cells(str(merged_range))
 
-        # ── Copiar pane de congelación ─────────────────────────────────
-        ws_dst.freeze_panes = ws_src.freeze_panes
+        # Anexar1 del reporte final debe quedar con desplazamiento libre.
+        # No heredamos los paneles congelados de la hoja de trabajo, porque
+        # una configuración de vista inválida o inusual del archivo origen
+        # puede impedir navegar normalmente por las filas inferiores.
+        ws_dst.freeze_panes = None
 
         wb_dst.save(ruta_final)
         print("  [OK] Pestaña 'Anexar1' copiada al reporte final.")
@@ -1455,69 +1788,169 @@ def _copiar_anexar1(ruta_inicial: Path, ruta_final: Path) -> None:
         print(f"  [Error] No se pudo copiar Anexar1: {e}")
 
 
-def _escribir_hoja_itf_com(ruta_final: Path, ruta_inicial: Path, meta: dict) -> None:
+def _escribir_hoja_itf_com(ruta_final: Path, ruta_inicial: Path, meta: dict, partidas: dict | None = None) -> None:
     """
-    Crea (o reemplaza) la pestaña 'ITF Y COM' en el reporte final con todos los
-    movimientos bancarios que corresponden a ITF o comisiones bancarias.
-    Criterio: descripción contiene 'ITF', 'COMIS', 'COM', 'MANTENIM', 'ENVIO', 'PORTES'.
+    Crea (o reemplaza) la pestaña 'ITF Y COM' en el reporte final.
+    Separa los conceptos clasificados en Anexar1 en 4 secciones independientes:
+      1. COMISIONES BANCARIAS – filas con columna Comisiones='X' (o diferencia de comisión)
+      2. ITF                  – filas con columna ITF='X'
+      3. ERROR                – filas con columna Error='X'
+      4. OTROS                – filas con columna Otros='X'
+    Cada sección incluye su tabla con FECHA, OPERACIÓN, DESCRIPCION, MONTO y su SUBTOTAL.
+    Al final se incluye una fila de TOTAL GENERAL con la suma de todas las secciones.
     """
-    df = _df_banco_desde_inicial(ruta_inicial)
-    if df is None or df.empty:
-        return
+    if partidas is None:
+        partidas = _clasificar_partidas(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), ruta_inicial=ruta_inicial)
 
-    # Filtrar movimientos ITF / comisiones
-    patron_itf = r'ITF|COMIS|MANTEN|ENVIO|PORTES|CARGO\s+PORTES|CARGO\s+MANTEN'
-    mask = df['_desc'].str.contains(patron_itf, case=False, na=False, regex=True)
-    df_itf = df[mask].copy()
+    itf_lista: list[dict] = list(partidas.get('itf_banco', []))
+    com_lista: list[dict] = list(partidas.get('comisiones_banco', []))
+    err_lista: list[dict] = list(partidas.get('error_banco', []))
+    otr_lista: list[dict] = list(partidas.get('otros_banco', []))
 
-    columnas    = ['Fecha', '# Operación', 'Descripción', 'Monto']
-    anchos_min  = [12.0, 16.0, 32.0, 14.0]
-    col_monto_i = 4  # índice (1-based) de la columna Monto
+    columnas   = ['FECHA', 'OPERACIÓN', 'DESCRIPCION', 'MONTO']
+    anchos_min = [14.0, 18.0, 42.0, 16.0]
+    col_monto_i = 4
+
+    # Colores de sección
+    COLOR_COM = 'ED7D31'   # Naranja        – Comisiones
+    COLOR_ITF = 'C00000'   # Rojo           – ITF
+    COLOR_ERR = 'BF8F00'   # Amarillo Ocre  – Error
+    COLOR_OTR = '70AD47'   # Verde          – Otros
 
     wb = openpyxl.load_workbook(ruta_final)
     if 'ITF Y COM' in wb.sheetnames:
         del wb['ITF Y COM']
 
-    # Insertar antes de 'Anexar1' si existe, sino al final
     pos = len(wb.sheetnames)
     if 'Anexar1' in wb.sheetnames:
         pos = wb.sheetnames.index('Anexar1')
     ws = wb.create_sheet('ITF Y COM', pos)
 
-    # Metadatos
-    fila_hdr = _fila_metadatos(ws, meta)
+    thin   = Side(style='thin', color='BFBFBF')
+    borde  = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    # Encabezado de tabla
-    _estilo_encabezado_mov(ws, fila_hdr, columnas, _COLOR_ITF_HDR)
+    # ── Metadatos (filas 1-3) ─────────────────────────────────────────
+    fila_inicio_datos = _fila_metadatos(ws, meta)  # devuelve 5
+    fila = fila_inicio_datos
 
-    # Datos
-    datos = []
-    for _, row in df_itf.iterrows():
-        fecha = row['_fecha']
-        datos.append({
-            'Fecha'       : fecha.to_pydatetime() if pd.notna(fecha) else None,
-            '# Operación' : row['_op'],
-            'Descripción' : row['_desc'],
-            'Monto'       : float(row['_monto']),
-        })
+    def _escribir_seccion(ws, fila: int, titulo: str, color: str, lista: list[dict], color_alt: str) -> tuple[int, str]:
+        """Escribe una sección (título + cabecera + filas de datos + subtotal) y devuelve (siguiente_fila, celda_subtotal)."""
+        if not lista:
+            return fila, ''
 
-    fila_datos_inicio = fila_hdr + 1
-    fila_sig = _escribir_filas_datos(ws, datos, columnas, fila_datos_inicio, _COLOR_ITF_HDR)
+        # Fila de título de sección
+        ws.row_dimensions[fila].height = 20
+        cell_tit = ws.cell(row=fila, column=1, value=titulo)
+        cell_tit.font      = Font(bold=True, size=11, name='Aptos Narrow', color='FFFFFF')
+        cell_tit.fill      = PatternFill('solid', fgColor=color)
+        cell_tit.alignment = Alignment(horizontal='left', vertical='center')
+        cell_tit.border    = borde
+        for col in range(2, len(columnas) + 1):
+            c = ws.cell(row=fila, column=col)
+            c.fill   = PatternFill('solid', fgColor=color)
+            c.border = borde
+        fila += 1
 
-    # Total
-    if datos:
-        _fila_total(ws, fila_sig, len(columnas), col_monto_i, fila_datos_inicio, _COLOR_ITF_HDR)
+        # Encabezado de tabla
+        _estilo_encabezado_mov(ws, fila, columnas, color)
+        fila += 1
 
-    # Título de sección (fila 5 del formato propuesto)
-    ws.cell(row=fila_hdr - 1, column=3, value='COMISIONES BANCARIAS / ITF').font = Font(
-        bold=True, size=11, name='Aptos Narrow', color=_COLOR_ITF_HDR
-    )
+        # Datos
+        fila_datos_ini = fila
+        for i, dato in enumerate(lista):
+            bg = 'FFFFFF' if i % 2 == 0 else color_alt
+            for col_idx, col_key in enumerate(['fecha', 'operacion', 'descripcion', 'monto'], start=1):
+                valor = dato.get(col_key)
+                cell = ws.cell(row=fila, column=col_idx, value=valor)
+                cell.font   = Font(size=10, name='Aptos Narrow')
+                cell.fill   = PatternFill('solid', fgColor=bg)
+                cell.border = borde
+                cell.alignment = Alignment(vertical='center')
+                if col_key == 'monto':
+                    cell.number_format = '#,##0.00'
+                    cell.alignment     = Alignment(horizontal='right', vertical='center')
+                elif col_key == 'fecha':
+                    if isinstance(valor, datetime):
+                        cell.number_format = 'DD/MM/YYYY'
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                elif col_key == 'operacion':
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+            ws.row_dimensions[fila].height = 15
+            fila += 1
+
+        # Fila de subtotal
+        col_letra = get_column_letter(col_monto_i)
+        celda_subtotal = f"{col_letra}{fila}"
+        for col in range(1, len(columnas) + 1):
+            cell = ws.cell(row=fila, column=col)
+            cell.fill   = PatternFill('solid', fgColor=_COLOR_TOTAL_BG)
+            cell.border = borde
+            if col == 1:
+                cell.value     = f"TOTAL {titulo}"
+                cell.font      = Font(bold=True, size=10, name='Aptos Narrow')
+                cell.alignment = Alignment(horizontal='left', vertical='center')
+            elif col == col_monto_i:
+                cell.value         = f"=SUM({col_letra}{fila_datos_ini}:{col_letra}{fila - 1})"
+                cell.font          = Font(bold=True, size=10, name='Aptos Narrow')
+                cell.number_format = '#,##0.00'
+                cell.alignment     = Alignment(horizontal='right', vertical='center')
+        ws.row_dimensions[fila].height = 16
+        fila += 1
+
+        # Espaciador entre secciones
+        ws.row_dimensions[fila].height = 8
+        fila += 1
+        return fila, celda_subtotal
+
+    subtotales_cells = []
+
+    # ── Sección 1: COMISIONES BANCARIAS ──────────────────────────────
+    if com_lista:
+        fila, c_sub = _escribir_seccion(ws, fila, 'COMISIONES BANCARIAS', COLOR_COM, com_lista, 'FFF2E8')
+        if c_sub: subtotales_cells.append(c_sub)
+
+    # ── Sección 2: ITF ────────────────────────────────────────────────
+    if itf_lista:
+        fila, c_sub = _escribir_seccion(ws, fila, 'ITF', COLOR_ITF, itf_lista, 'FFEEEE')
+        if c_sub: subtotales_cells.append(c_sub)
+
+    # ── Sección 3: ERROR ──────────────────────────────────────────────
+    if err_lista:
+        fila, c_sub = _escribir_seccion(ws, fila, 'ERROR', COLOR_ERR, err_lista, 'FFFBE6')
+        if c_sub: subtotales_cells.append(c_sub)
+
+    # ── Sección 4: OTROS ──────────────────────────────────────────────
+    if otr_lista:
+        fila, c_sub = _escribir_seccion(ws, fila, 'OTROS', COLOR_OTR, otr_lista, 'F0F9ED')
+        if c_sub: subtotales_cells.append(c_sub)
+
+    # ── Fila de TOTAL GENERAL ─────────────────────────────────────────
+    if len(subtotales_cells) > 1:
+        ws.row_dimensions[fila].height = 18
+        double_bottom = Side(style='double', color='000000')
+        top_thin = Side(style='thin', color='000000')
+        borde_tot_gen = Border(top=top_thin, bottom=double_bottom, left=thin, right=thin)
+
+        for col in range(1, len(columnas) + 1):
+            cell = ws.cell(row=fila, column=col)
+            cell.fill   = PatternFill('solid', fgColor='D9E1F2')
+            cell.border = borde_tot_gen
+            if col == 1:
+                cell.value     = 'TOTAL GENERAL'
+                cell.font      = Font(bold=True, size=11, name='Aptos Narrow')
+                cell.alignment = Alignment(horizontal='left', vertical='center')
+            elif col == col_monto_i:
+                cell.value         = f"={'+'.join(subtotales_cells)}"
+                cell.font          = Font(bold=True, size=11, name='Aptos Narrow')
+                cell.number_format = '#,##0.00'
+                cell.alignment     = Alignment(horizontal='right', vertical='center')
+        fila += 1
 
     _ajustar_columnas(ws, columnas, anchos_min)
-    ws.freeze_panes = 'A6'
+    ws.freeze_panes = 'A5'
 
     wb.save(ruta_final)
-    print(f"  [OK] Pestaña 'ITF Y COM' generada ({len(datos)} movimientos).")
+    print(f"  [OK] Pestaña 'ITF Y COM' generada ({len(com_lista)} comisiones, {len(itf_lista)} ITF, {len(err_lista)} error, {len(otr_lista)} otros).")
 
 
 def _escribir_hoja_ingresos(ruta_final: Path, ruta_inicial: Path, meta: dict) -> None:

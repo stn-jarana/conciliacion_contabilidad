@@ -499,6 +499,53 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
                     banco_ext.at[b_idx, '# Operación2'] = op_link
                     banco_ext.at[b_idx, 'Anotación'] = anot
 
+    # 4.4. Sugerencia por ITF (Suma de 'IMPUESTO ITF' en Banco = Movimiento con 'ITF' en Glosa Conta)
+    mask_itf_b = (
+        (~banco_ext['_matched']) &
+        (~banco_ext['Anotación'].astype(str).str.startswith('Sugerido')) &
+        (banco_ext['Banco - Descripción'].astype(str).str.contains(r'\bITF\b|IMPUESTO\s+ITF', case=False, na=False))
+    )
+    if mask_itf_b.any():
+        sum_b_itf = round(float(banco_ext.loc[mask_itf_b, 'Monto-Banco'].sum()), 2)
+        idxs_b = banco_ext[mask_itf_b].index.tolist()
+
+        candidates_c = conta_ext[
+            (~conta_ext['_matched']) &
+            (~conta_ext.get('_suggested', pd.Series([False] * len(conta_ext)))) &
+            (~conta_ext['Anotación'].astype(str).str.startswith('Sugerido')) &
+            (conta_ext['Conta - Glosa'].astype(str).str.contains(r'\bitf\b', case=False, na=False))
+        ]
+
+        matched_itf = False
+        for c_idx, row_c in candidates_c.iterrows():
+            m_c = float(row_c.get('Monto-Conta', 0) or 0)
+            if round(abs(abs(sum_b_itf) - abs(m_c)), 2) == 0.0:
+                op_link = f"SUG-ITF-{c_idx}"
+                anot_itf = "Sugerido: ITF (Suma Banco = Conta)"
+                conta_ext.at[c_idx, '# Operación2'] = op_link
+                conta_ext.at[c_idx, 'Anotación'] = anot_itf
+                conta_ext.at[c_idx, '_suggested'] = True
+
+                for b_idx in idxs_b:
+                    banco_ext.at[b_idx, '# Operación2'] = op_link
+                    banco_ext.at[b_idx, 'Anotación'] = anot_itf
+                matched_itf = True
+                break
+
+        if not matched_itf and len(candidates_c) > 1:
+            sum_c_itf = round(float(candidates_c['Monto-Conta'].sum()), 2)
+            if round(abs(abs(sum_b_itf) - abs(sum_c_itf)), 2) == 0.0:
+                op_link = "SUG-ITF-MULT"
+                anot_itf = "Sugerido: ITF (Suma Banco = Suma Conta)"
+                for c_idx in candidates_c.index:
+                    conta_ext.at[c_idx, '# Operación2'] = op_link
+                    conta_ext.at[c_idx, 'Anotación'] = anot_itf
+                    conta_ext.at[c_idx, '_suggested'] = True
+                for b_idx in idxs_b:
+                    banco_ext.at[b_idx, '# Operación2'] = op_link
+                    banco_ext.at[b_idx, 'Anotación'] = anot_itf
+                matched_itf = True
+
     # 4.5. Sugerencias por Factoring (Glosa contiene 'factoring' y montos iguales sin importar la fecha)
     for b_idx, row_b in banco_ext.iterrows():
         if row_b['_matched']: continue
@@ -740,11 +787,6 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
         return df[~mask]
     banco_ext = _clean_df(banco_ext)
     conta_ext = _clean_df(conta_ext)
-    # Marcar las celdas con ITF como conciliadas y marcar el número de operación a 00000000
-    itf_mask = banco_ext['Banco - Descripción'].astype(str).str.upper().str.contains('ITF')
-    banco_ext.loc[itf_mask, 'MAR'] = 'X'
-    banco_ext.loc[itf_mask, 'Banco - # Operación'] = '00000000'
-    banco_ext.loc[itf_mask, '# Operación2'] = '00000000'
     
     if 'Anotación' not in banco_ext.columns: banco_ext['Anotación'] = ''
     if 'Anotación' not in conta_ext.columns: conta_ext['Anotación'] = ''
@@ -911,21 +953,21 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
     # 0 = Conciliados (MAR == 'X')
     # 1 = Faltan conciliar pero tienen sugerencia ('Sugerido:' en Anotación)
     # 2 = Mov. solo en banco / Mov. solo en conta
-    # 4 = ITF (descripción contiene 'ITF')
+    # 4 = ITF no sugerido (descripción contiene 'ITF')
     # 5 = Sin monto (ingreso=0 y egreso=0)
     def _orden_grupo(row):
         anotacion = str(row.get('Anotación', ''))
         # Sin monto: siempre al final de todo (aplica a banco y a conta)
         if 'sin monto (0)' in anotacion.lower():
             return 5
-        # ITF: al final pero antes de sin-monto
-        if 'ITF' in str(row.get('Banco - Descripción', '')).upper():
-            return 4
         if row.get('MAR') == 'X':
             return 0
-        # Sugeridos (faltan conciliar pero tienen sugerencia)
+        # Sugeridos (faltan conciliar pero tienen sugerencia, incluyendo ITF sugerido)
         if 'Sugerido:' in anotacion:
             return 1
+        # ITF no sugerido: al final pero antes de sin-monto
+        if 'ITF' in str(row.get('Banco - Descripción', '')).upper():
+            return 4
         # Solo en banco o solo en conta
         return 2
 
@@ -1096,22 +1138,17 @@ def _aplicar_formato(ruta: Path) -> None:
                 # Verificar si es sin monto
                 if 'sin monto (0)' in anot_val.lower():
                     es_sin_monto = True
-                # Verificar si es ITF
-                elif col_banco_desc_idx is not None:
-                    desc_val = str(row[col_banco_desc_idx].value or '')
-                    if 'ITF' in desc_val.upper():
-                        es_itf = True
-
-                if not es_itf and not es_sin_monto:
-                    if val_mar != 'X':
-                        es_rojo = True
-                        if 'Sugerido:' in anot_val:
-                            es_sugerido = True
-                            es_rojo = False
-                            # Obtener color del grupo sugerido
-                            if col_op2_idx is not None:
-                                op2_key = str(row[col_op2_idx].value or '')
-                                color_sug_grupo = sug_group_colors.get(op2_key)
+                elif 'Sugerido:' in anot_val:
+                    es_sugerido = True
+                    # Obtener color del grupo sugerido
+                    if col_op2_idx is not None:
+                        op2_key = str(row[col_op2_idx].value or '')
+                        color_sug_grupo = sug_group_colors.get(op2_key)
+                # Verificar si es ITF no sugerido
+                elif col_banco_desc_idx is not None and 'ITF' in str(row[col_banco_desc_idx].value or '').upper():
+                    es_itf = True
+                elif val_mar != 'X':
+                    es_rojo = True
 
             for idx, cell in enumerate(row):
                 cell.alignment = Alignment(vertical='center')

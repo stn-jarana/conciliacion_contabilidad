@@ -136,7 +136,7 @@ EMPRESAS = [
         "nombre"  : "Southern Textil Network (STN)",
         "ruc"     : "20376729126",
         "monedas" : [
-            {"nombre": "Dolares (USD)", "sheet_bank": "STN DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Dolares (USD)", "sheet_bank": ("STN DOL", "STN USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
             {"nombre": "Soles (PEN)",   "sheet_bank": "STN SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
@@ -144,7 +144,7 @@ EMPRESAS = [
         "nombre"  : "Integrated Textile Solutions (ITS)",
         "ruc"     : "20601910603",
         "monedas" : [
-            {"nombre": "Dolares (USD)", "sheet_bank": "ITS DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Dolares (USD)", "sheet_bank": ("ITS DOL", "ITS USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
             {"nombre": "Soles (PEN)",   "sheet_bank": "ITS SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
@@ -152,7 +152,7 @@ EMPRESAS = [
         "nombre"  : "CMT del Sur",
         "ruc"     : "20537658471",
         "monedas" : [
-            {"nombre": "Dolares (USD)", "sheet_bank": "CMT DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Dolares (USD)", "sheet_bank": ("CMT DOL", "CMT USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
             {"nombre": "Soles (PEN)",   "sheet_bank": "CMT SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
@@ -160,7 +160,7 @@ EMPRESAS = [
         "nombre"  : "Dynamitex",
         "ruc"     : "20600995761",
         "monedas" : [
-            {"nombre": "Dolares (USD)", "sheet_bank": "DYNAMITEX DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Dolares (USD)", "sheet_bank": ("DYNAMITEX DOL", "DYNAMITEX USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
             {"nombre": "Soles (PEN)",   "sheet_bank": "DYNAMITEX SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
@@ -168,7 +168,7 @@ EMPRESAS = [
         "nombre"  : "DINSURA",
         "ruc"     : "20603964571",
         "monedas" : [
-            {"nombre": "Dolares (USD)", "sheet_bank": "DINSURA DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Dolares (USD)", "sheet_bank": ("DINSURA DOL", "DINSURA USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
             {"nombre": "Soles (PEN)",   "sheet_bank": "DINSURA SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
@@ -183,7 +183,7 @@ EMPRESAS = [
         "nombre"  : "Inversiones Forestales del Sur (INFOSUR)",
         "ruc"     : "20600567890",
         "monedas" : [
-            {"nombre": "Dolares (USD)", "sheet_bank": "INFOSUR DOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Dolares (USD)", "sheet_bank": ("INFOSUR DOL", "INFOSUR USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
             {"nombre": "Soles (PEN)",   "sheet_bank": "INFOSUR SOL", "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
@@ -327,7 +327,31 @@ def flujo_reporte_inicial(config: dict) -> None:
     print()
 
     # ── Carga raw ─────────────────────────────────────────────────────
-    bank_raw  = pd.read_excel(file_bank,  sheet_name=config['sheet_bank'], skiprows=config['skip_bank'])
+    # Buscar automáticamente la hoja correcta
+    xls = pd.ExcelFile(file_bank)
+
+    sheet_bank = config["sheet_bank"]
+
+    if isinstance(sheet_bank, (tuple, list)):
+        hoja_encontrada = next(
+            (h for h in sheet_bank if h in xls.sheet_names),
+            None
+        )
+    else:
+        hoja_encontrada = sheet_bank
+
+    if hoja_encontrada is None:
+        raise ValueError(
+            f"No se encontró ninguna de las hojas: {sheet_bank}"
+        )
+
+    bank_raw = pd.read_excel(
+        file_bank,
+        sheet_name=hoja_encontrada,
+        skiprows=config["skip_bank"]
+    )
+
+    # bank_raw  = pd.read_excel(file_bank,  sheet_name=config['sheet_bank'], skiprows=config['skip_bank'])
     conta_raw = pd.read_excel(file_conta, skiprows=config['skip_conta'])
 
     # ── Sanitización banco ────────────────────────────────────────────
