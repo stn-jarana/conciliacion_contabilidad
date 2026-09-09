@@ -462,6 +462,15 @@ def flujo_reporte_inicial(config: dict) -> None:
 
     conta = conta.sort_values('fecha_mov').reset_index(drop=True)
 
+    # ── Cargar movimientos pendientes de la conciliación anterior ─────
+    try:
+        from pendientes import cargar_pendientes, inyectar_pendientes_en_banco, inyectar_pendientes_en_conta
+        df_banco_pend, df_conta_pend = cargar_pendientes(config.get('empresa', ''))
+        bank  = inyectar_pendientes_en_banco(bank,  df_banco_pend)
+        conta = inyectar_pendientes_en_conta(conta, df_conta_pend)
+    except Exception as e_pend:
+        print(f"  [AVISO] No se pudieron cargar los pendientes anteriores: {e_pend}")
+
     # ── Generar reporte ───────────────────────────────────────────────
     banco_nombre = _extraer_nombre_banco(file_conta, config['skip_conta'])
     mes_anio     = _mes_anio_desde_bank(bank)

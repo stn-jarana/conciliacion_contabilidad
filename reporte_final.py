@@ -278,6 +278,25 @@ def generar_reporte_final(
     # ── Imprimir resumen en consola ───────────────────────────────────
     _imprimir_resumen_consola(saldos, partidas, ruta_salida)
 
+    # ── Guardar movimientos sin conciliar (Mov_sin_conciliar.xlsx) ────
+    try:
+        from pendientes import guardar_pendientes
+        guardar_pendientes(
+            empresa=empresa,
+            banco_sin_conciliar=banco_sin_marcar,
+            conta_sin_conciliar=conta_sin_marcar,
+        )
+    except Exception as e_pend:
+        print(f"  [AVISO] No se pudieron guardar los movimientos pendientes: {e_pend}")
+
+    # ── Exportar conciliados para Contanet (Ingreso_a_contanet.xlsx) ──
+    try:
+        from pendientes import guardar_conciliados
+        if not conciliados.empty:
+            guardar_conciliados(empresa=empresa, df_conciliados=conciliados)
+    except Exception as e_conc:
+        print(f"  [AVISO] No se pudo guardar el archivo de conciliados para Contanet: {e_conc}")
+
     return ruta_salida
 
 
