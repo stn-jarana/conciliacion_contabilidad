@@ -14,6 +14,7 @@ Uso:
     generar_reporte_inicial(bank, conta, ruta_salida)
 """
 
+# import re
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
@@ -209,74 +210,180 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
     mask_sin_monto_b = banco_ext.get('Anotación', pd.Series([''] * len(banco_ext))).str.contains('sin monto', case=False, na=False)
     banco_ext.loc[mask_sin_monto_b, '_matched'] = True  # Marcar como ya procesados para ignorarlos
 
-    # 1. Código igual
-    for b_idx, row_b in banco_ext.iterrows():
-        if row_b['_matched']: continue
-        op_b = str(row_b.get('Banco - # Operación', '')).strip()
-        if not op_b or op_b == 'nan': continue
-        m_b = float(row_b.get('Monto-Banco', 0) or 0)
-        
-        candidates = conta_ext[
-            (~conta_ext['_matched']) & 
-            (conta_ext['Conta - # Operación'].astype(str).str.strip() == op_b) &
-            (abs(conta_ext['Monto-Conta'].fillna(0) - m_b) <= 0.01)
-        ]
-        if len(candidates) == 1:
-            c_idx = candidates.index[0]
+    # Helper para normalizar y comparar números de operación
+    def _normalizar_nro_op(val) -> str:
+        if val is None or pd.isna(val):
+            return ""
+        s = str(val).strip()
+        if s.lower() == "nan" or s == "0":
+            return ""
+        if s.endswith(".0"):
+            s = s[:-2].strip()
+        return s
+
+    def _coincide_nro_op(op_b: str, op_c: str) -> bool:
+        import re
+
+        nb = _normalizar_nro_op(op_b)
+        nc = _normalizar_nro_op(op_c)
+        if not nb or not nc:
+            return False
+        # Coincidencia por últimos 6 dígitos (aunque los demás dígitos sean distintos)
+        db = re.sub(r'\D', '', nb)
+        dc = re.sub(r'\D', '', nc)
+        if len(db) >= 6 and len(dc) >= 6:
+            if db[-6:] == dc[-6:]:
+                return True
+        # Exactamente iguales con al menos 3 caracteres
+        if nb == nc and len(nb) >= 3:
+            return True
+        sb = nb.lstrip('0') or nb
+        sc = nc.lstrip('0') or nc
+        if sb == sc and len(sb) >= 3:
+            return True
+        # Conta es sufijo de Banco (mínimo 4 caracteres)
+        variantes_c = [v for v in {nc, sc} if len(v) >= 4]
+        for vc in variantes_c:
+            if nb.endswith(vc):
+                return True
+        # Banco es sufijo de Conta (mínimo 4 caracteres)
+        variantes_b = [v for v in {nb, sb} if len(v) >= 4]
+        for vb in variantes_b:
+            if nc.endswith(vb):
+                return True
+        return False
+
+    # 1. Reglas por coincidencia de # Operación (exacto o sufijo)
+    # 1.1 Mismo valor (Monto igual) -> Conciliación automática con "Auto: Sufijo de # Operación"
+    for c_idx, row_c in conta_ext.iterrows():
+        if row_c['_matched']: continue
+        op_c = _normalizar_nro_op(row_c.get('Conta - # Operación'))
+        if not op_c: continue
+        m_c = float(row_c.get('Monto-Conta', 0) or 0)
+        if m_c == 0: continue
+
+        candidatos_b = []
+        for b_idx, row_b in banco_ext[~banco_ext['_matched']].iterrows():
+            op_b = _normalizar_nro_op(row_b.get('Banco - # Operación'))
+            if not op_b: continue
+            if _coincide_nro_op(op_b, op_c):
+                m_b = float(row_b.get('Monto-Banco', 0) or 0)
+                if abs(m_b - m_c) <= 0.01:
+                    candidatos_b.append(b_idx)
+
+        b_idx_elegido = None
+        if len(candidatos_b) == 1:
+            b_idx_elegido = candidatos_b[0]
+        elif len(candidatos_b) > 1:
+            cands_fecha = [b for b in candidatos_b if banco_ext.at[b, 'Fecha'] == row_c['Fecha']]
+            if len(cands_fecha) == 1:
+                b_idx_elegido = cands_fecha[0]
+            else:
+                b_idx_elegido = candidatos_b[0]
+
+        if b_idx_elegido is not None:
+            b_idx = b_idx_elegido
+            op_b = _normalizar_nro_op(banco_ext.at[b_idx, 'Banco - # Operación'])
             banco_ext.at[b_idx, '_matched'] = True
             conta_ext.at[c_idx, '_matched'] = True
             banco_ext.at[b_idx, 'MAR'] = 'X'
             conta_ext.at[c_idx, 'MAR'] = 'X'
-            banco_ext.at[b_idx, '# Operación2'] = op_b
-            conta_ext.at[c_idx, '# Operación2'] = op_b
-            banco_ext.at[b_idx, 'Anotación'] = 'Auto: Código igual'
-            conta_ext.at[c_idx, 'Anotación'] = 'Auto: Código igual'
+            op_link = op_b or op_c
+            banco_ext.at[b_idx, '# Operación2'] = op_link
+            conta_ext.at[c_idx, '# Operación2'] = op_link
+            banco_ext.at[b_idx, 'Anotación'] = 'Auto: Sufijo de # Operación'
+            conta_ext.at[c_idx, 'Anotación'] = 'Auto: Sufijo de # Operación'
 
-    # 1.2 Código igual pero monto diferente (diferencia > 0.01).
-    # Solo se sugiere si la diferencia corresponde a una comisión conocida.
-    # Caso contrario, la pareja queda como observación y no puede ser tomada
-    # por reglas posteriores de sugerencia.
+    # 1.2 Diferencia en los montos correspondiente a comisiones -> Conciliación automática con "Auto: Sufijo de # Operación"
+    for c_idx, row_c in conta_ext.iterrows():
+        if row_c['_matched']: continue
+        op_c = _normalizar_nro_op(row_c.get('Conta - # Operación'))
+        if not op_c: continue
+        m_c = float(row_c.get('Monto-Conta', 0) or 0)
+        if m_c == 0: continue
+
+        candidatos_b = []
+        for b_idx, row_b in banco_ext[~banco_ext['_matched']].iterrows():
+            op_b = _normalizar_nro_op(row_b.get('Banco - # Operación'))
+            if not op_b: continue
+            if _coincide_nro_op(op_b, op_c):
+                m_b = float(row_b.get('Monto-Banco', 0) or 0)
+                if (m_b > 0) == (m_c > 0):
+                    dif = round(abs(m_b - m_c), 2)
+                    if dif in diferencias_set:
+                        candidatos_b.append((b_idx, round(m_b - m_c, 2)))
+
+        b_idx_elegido = None
+        dif_elegido = 0.0
+        if len(candidatos_b) == 1:
+            b_idx_elegido, dif_elegido = candidatos_b[0]
+        elif len(candidatos_b) > 1:
+            cands_fecha = [(b, d) for (b, d) in candidatos_b if banco_ext.at[b, 'Fecha'] == row_c['Fecha']]
+            if len(cands_fecha) == 1:
+                b_idx_elegido, dif_elegido = cands_fecha[0]
+            else:
+                b_idx_elegido, dif_elegido = candidatos_b[0]
+
+        if b_idx_elegido is not None:
+            b_idx = b_idx_elegido
+            op_b = _normalizar_nro_op(banco_ext.at[b_idx, 'Banco - # Operación'])
+            banco_ext.at[b_idx, '_matched'] = True
+            conta_ext.at[c_idx, '_matched'] = True
+            banco_ext.at[b_idx, 'MAR'] = 'X'
+            conta_ext.at[c_idx, 'MAR'] = 'X'
+            op_link = op_b or op_c
+            banco_ext.at[b_idx, '# Operación2'] = op_link
+            conta_ext.at[c_idx, '# Operación2'] = op_link
+            banco_ext.at[b_idx, 'Anotación'] = 'Auto: Sufijo de # Operación'
+            conta_ext.at[c_idx, 'Anotación'] = 'Auto: Sufijo de # Operación'
+            banco_ext.at[b_idx, 'DIF COMISON'] = dif_elegido
+
+    # 1.3 Diferencia distinta a todas las comisiones -> Sugerido para evaluación del especialista
     if '_suggested' not in conta_ext.columns:
         conta_ext['_suggested'] = False
-    for b_idx, row_b in banco_ext.iterrows():
-        if row_b['_matched']: continue
-        if str(banco_ext.at[b_idx, 'Anotación']).startswith('Sugerido'): continue
-        op_b = str(row_b.get('Banco - # Operación', '')).strip()
-        if not op_b or op_b == 'nan': continue
-        m_b = float(row_b.get('Monto-Banco', 0) or 0)
-        if m_b == 0: continue
 
-        candidates = conta_ext[
-            (~conta_ext['_matched']) &
-            (~conta_ext.get('_suggested', pd.Series([False]*len(conta_ext)))) &
-            (~conta_ext['Anotación'].astype(str).str.startswith('Sugerido')) &
-            (conta_ext['Conta - # Operación'].astype(str).str.strip() == op_b) &
-            (abs(conta_ext['Monto-Conta'].fillna(0) - m_b) > 0.01)
-        ]
-        if len(candidates) == 1:
-            c_idx = candidates.index[0]
-            m_c = float(conta_ext.at[c_idx, 'Monto-Conta'] or 0)
-            dif = round(abs(m_b - m_c), 2)
+    for c_idx, row_c in conta_ext.iterrows():
+        if row_c['_matched']: continue
+        if conta_ext.at[c_idx, '_suggested']: continue
+        op_c = _normalizar_nro_op(row_c.get('Conta - # Operación'))
+        if not op_c: continue
+        m_c = float(row_c.get('Monto-Conta', 0) or 0)
+        if m_c == 0: continue
 
-            if dif in diferencias_set:
-                op_link = f"SUG-COD-COM-{op_b}"
-                banco_ext.at[b_idx, '# Operación2'] = op_link
-                conta_ext.at[c_idx, '# Operación2'] = op_link
-                anot = f"Sugerido: Código igual, comisión {dif:.2f}"
-                banco_ext.at[b_idx, 'Anotación'] = anot
-                conta_ext.at[c_idx, 'Anotación'] = anot
-                conta_ext.at[c_idx, '_suggested'] = True
-            else:
-                op_link = f"OBS-COD-DIF-{op_b}"
-                banco_ext.at[b_idx, '# Operación2'] = op_link
-                conta_ext.at[c_idx, '# Operación2'] = op_link
-                anot = f"Observación: Código igual, diferencia de monto {dif:.2f}"
-                banco_ext.at[b_idx, 'Anotación'] = anot
-                conta_ext.at[c_idx, 'Anotación'] = anot
-                # Se excluyen de reglas posteriores, pero sin MAR='X': siguen
-                # visibles como movimientos no conciliados para revisión.
-                banco_ext.at[b_idx, '_matched'] = True
-                conta_ext.at[c_idx, '_matched'] = True
+        candidatos_b = []
+        for b_idx, row_b in banco_ext[~banco_ext['_matched']].iterrows():
+            if str(banco_ext.at[b_idx, 'Anotación']).startswith('Sugerido'): continue
+            op_b = _normalizar_nro_op(row_b.get('Banco - # Operación'))
+            if not op_b: continue
+            if _coincide_nro_op(op_b, op_c):
+                m_b = float(row_b.get('Monto-Banco', 0) or 0)
+                if (m_b > 0) == (m_c > 0):
+                    dif = round(abs(m_b - m_c), 2)
+                    if dif > 0.01 and dif not in diferencias_set:
+                        candidatos_b.append((b_idx, dif))
+
+        b_idx_elegido = None
+        dif_elegido = 0.0
+        if len(candidatos_b) == 1:
+            b_idx_elegido, dif_elegido = candidatos_b[0]
+        elif len(candidatos_b) > 1:
+            cands_fecha = [(b, d) for (b, d) in candidatos_b if banco_ext.at[b, 'Fecha'] == row_c['Fecha']]
+            if len(cands_fecha) == 1:
+                b_idx_elegido, dif_elegido = cands_fecha[0]
+
+        if b_idx_elegido is not None:
+            b_idx = b_idx_elegido
+            op_b = _normalizar_nro_op(banco_ext.at[b_idx, 'Banco - # Operación'])
+            op_link = f"SUG-OP-DIF-{op_b or op_c}"
+            banco_ext.at[b_idx, '# Operación2'] = op_link
+            conta_ext.at[c_idx, '# Operación2'] = op_link
+            anot = f"Sugerido: Sufijo de # Operación, diferencia de monto {dif_elegido:.2f}"
+            banco_ext.at[b_idx, 'Anotación'] = anot
+            conta_ext.at[c_idx, 'Anotación'] = anot
+            conta_ext.at[c_idx, '_suggested'] = True
+            banco_ext.at[b_idx, '_matched'] = True
+            conta_ext.at[c_idx, '_matched'] = True
+            banco_ext.at[b_idx, 'DIF COMISON'] = round(float(banco_ext.at[b_idx, 'Monto-Banco']) - float(conta_ext.at[c_idx, 'Monto-Conta']), 2)
 
     # 1.5 # Operación de Conta contenido en Descripción de Banco + Monto igual
     for c_idx, row_c in conta_ext.iterrows():
@@ -304,42 +411,6 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             banco_ext.at[b_idx, 'Anotación'] = 'Auto: # Operación en Glosa Banco'
             conta_ext.at[c_idx, 'Anotación'] = 'Auto: # Operación en Glosa Banco'
 
-    # 1.6 # Operación de Conta es sufijo del # Operación de Banco + Monto igual
-    for c_idx, row_c in conta_ext.iterrows():
-        if row_c['_matched']: continue
-        op_c = str(row_c.get('Conta - # Operación', '')).strip()
-        if not op_c or op_c == 'nan' or op_c == '0' or len(op_c) < 4: continue
-
-        m_c = float(row_c.get('Monto-Conta', 0) or 0)
-        # Generar variantes del código a buscar: exacto y sin ceros iniciales
-        op_c_stripped = op_c.lstrip('0') or op_c
-        variantes = list({op_c, op_c_stripped})
-
-        candidates = pd.DataFrame()
-        for variante in variantes:
-            if len(variante) < 4:
-                continue
-            c = banco_ext[
-                (~banco_ext['_matched']) &
-                (abs(banco_ext['Monto-Banco'].fillna(0) - m_c) <= 0.01) &
-                (banco_ext['Banco - # Operación'].astype(str).str.strip().str.endswith(variante))
-            ]
-            if not c.empty:
-                candidates = c
-                break
-
-        if len(candidates) == 1:
-            b_idx = candidates.index[0]
-            op_b = str(banco_ext.at[b_idx, 'Banco - # Operación']).strip()
-            banco_ext.at[b_idx, '_matched'] = True
-            conta_ext.at[c_idx, '_matched'] = True
-            banco_ext.at[b_idx, 'MAR'] = 'X'
-            conta_ext.at[c_idx, 'MAR'] = 'X'
-            op_link = op_b
-            banco_ext.at[b_idx, '# Operación2'] = op_link
-            conta_ext.at[c_idx, '# Operación2'] = op_link
-            banco_ext.at[b_idx, 'Anotación'] = 'Auto: Sufijo de # Operación'
-            conta_ext.at[c_idx, 'Anotación'] = 'Auto: Sufijo de # Operación'
 
     # 1.65 Conciliación por descarte cuando quedan exactamente 1 banco y 1 conta no conciliados
     # con mismo monto y misma fecha (fecha exacta). Cubre el caso donde todos los demás ya
@@ -1007,6 +1078,17 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
             if not is_valid_op(op_conta) and is_valid_op(op_banco):
                 row['Conta - # Operación'] = op_banco
 
+            # Si ambos montos están presentes y hay diferencia por comisión, reflejar en DIF COMISON
+            mb_val = row.get('Monto-Banco')
+            mc_val = row.get('Monto-Conta')
+            if pd.notna(mb_val) and pd.notna(mc_val):
+                try:
+                    dif_calc = round(float(mb_val or 0) - float(mc_val or 0), 2)
+                    if round(abs(dif_calc), 2) in _diferencias_comision(moneda):
+                        row['DIF COMISON'] = dif_calc
+                except (ValueError, TypeError):
+                    pass
+
             matched_rows.append(row)
 
     df_matched = pd.DataFrame(matched_rows, columns=cols) if matched_rows else pd.DataFrame(columns=cols)
@@ -1103,11 +1185,18 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
             return ''
         if dif_f == 0.0:
             return ''
+        # Si la anotación es por sufijo de operación y hay diferencia, marcar 'X' en Comisiones
+        anot = str(row.get('Anotación', '') or '').lower()
+        if 'sufijo de # operación' in anot:
+            return 'X'
         # Solo marcar como comisión si el valor absoluto corresponde a una comisión conocida
         return 'X' if round(abs(dif_f), 2) in _difs_comision else ''
 
     def _marcar_error(row):
         anot = str(row.get('Anotación', '') or '')
+        # Si es por sufijo de operación, se clasifica en Comisiones a petición del usuario
+        if 'sufijo de # operación' in anot.lower():
+            return ''
         # Solo aplica a pares de Observación (diferencia de monto con mismo código)
         if 'diferencia de monto' not in anot.lower():
             return ''

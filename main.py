@@ -477,8 +477,11 @@ def flujo_reporte_inicial(config: dict) -> None:
         except Exception:
             pass
 
+        banco_nombre = _extraer_nombre_banco(file_conta, config['skip_conta'])
         df_banco_pend, df_conta_pend = cargar_pendientes(
             config.get('empresa', ''),
+            banco=banco_nombre,
+            moneda=config.get('nombre', ''),
             mes_ref=mes_ref,
             anio_ref=anio_ref,
         )
@@ -488,7 +491,6 @@ def flujo_reporte_inicial(config: dict) -> None:
         print(f"  [AVISO] No se pudieron cargar los pendientes anteriores: {e_pend}")
 
     # ── Generar reporte ───────────────────────────────────────────────
-    banco_nombre = _extraer_nombre_banco(file_conta, config['skip_conta'])
     mes_anio     = _mes_anio_desde_bank(bank)
     ruta_salida  = _construir_nombre_archivo(
         'CBI',
@@ -544,6 +546,15 @@ def flujo_reporte_final(config: dict) -> None:
     except Exception:
         pass
 
+    if banco_nombre in ('', 'BANCO'):
+        nombre_arch = file_inicial.name.upper()
+        if 'BCP' in nombre_arch or 'CREDITO' in nombre_arch:
+            banco_nombre = 'BCP'
+        elif 'SCOTIA' in nombre_arch:
+            banco_nombre = 'Scotia'
+        elif 'BN' in nombre_arch or 'NACION' in nombre_arch:
+            banco_nombre = 'BN'
+
     mes_anio = _mes_anio_desde_inicial(file_inicial)
     ruta_salida = _construir_nombre_archivo(
         'CBF',
@@ -560,6 +571,7 @@ def flujo_reporte_final(config: dict) -> None:
             empresa=config.get('empresa', ''),
             ruc=config.get('ruc', ''),
             moneda=config.get('nombre', ''),
+            banco=banco_nombre,
         )
     except ValueError as e:
         print(f"\n  X Error: {e}\n")

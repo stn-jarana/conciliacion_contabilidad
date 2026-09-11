@@ -47,26 +47,230 @@ COLS_CONTA = [
 ]
 
 
-# ══════════════════════════════════════════════════════════════════════
+# # ══════════════════════════════════════════════════════════════════════
 # UTILIDADES
 # ══════════════════════════════════════════════════════════════════════
 
+# ── Catálogo estándar de empresas y columnas ────────────────────────
+EMPRESAS_CATALOGO = [
+    "STN",
+    "ITS",
+    "CMT",
+    "Dynamitex",
+    "DINSURA",
+    "Peru Commerce",
+    "INFOSUR",
+    "TST",
+    "Inaupari",
+    "TECA",
+    "DIONISO",
+]
+
+COLS_CONCILIADOS = ['Asiento Contable', 'Año', 'Mes', 'Número de Operación', 'Anotación']
+COLS_PENDIENTES = [
+    'ORIGEN', 'fecha', 'descripcion', 'monto', 'saldo',
+    'sucursal', 'nro_operacion', 'hora', 'usuario',
+    'nro_registro', 'fecha_mov', 'medio_pago', 'giro', 'glosa',
+    'ingreso', 'egreso', 'fecha_conciliacion', 'conciliado',
+]
+
+
 def _normalizar_empresa(nombre: str) -> str:
     """Normaliza el nombre de empresa para usarlo como nombre de hoja Excel."""
-    # Quitar tildes y caracteres especiales
-    normalizado = unicodedata.normalize('NFD', nombre)
+    t = str(nombre).strip()
+    t_nfd = unicodedata.normalize('NFD', t)
+    t_sin = ''.join(c for c in t_nfd if unicodedata.category(c) != 'Mn').upper()
+
+    if 'THIMBLE' in t_sin or t_sin == 'TST':
+        return 'TST'
+    if 'PERU COMMERCE' in t_sin or 'P.COMMERCE' in t_sin:
+        return 'Peru_Commerce'
+    if 'INVERSIONES FORESTALES' in t_sin or t_sin == 'INFOSUR':
+        return 'INFOSUR'
+    if 'SOUTHERN TEXTIL' in t_sin:
+        return 'STN'
+    if 'INTEGRATED TEXTILE' in t_sin:
+        return 'ITS'
+    if 'CMT DEL SUR' in t_sin:
+        return 'CMT'
+
+    normalizado = unicodedata.normalize('NFD', t)
     sin_tildes  = ''.join(c for c in normalizado if unicodedata.category(c) != 'Mn')
-    # Reemplazar caracteres no alfanuméricos (excepto guion) por guion bajo
     limpio = re.sub(r'[^\w\-]', '_', sin_tildes)
     limpio = re.sub(r'_+', '_', limpio).strip('_')
-    # Limitar a 31 caracteres (límite de Excel para nombres de hoja)
     return limpio[:31]
 
 
-def _archivo_accesible() -> bool:
-    """Verifica si la ruta de red es accesible."""
+def _normalizar_texto_simple(texto: str) -> str:
+    """Quita tildes, espacios extra y pasa a mayúsculas para comparaciones flexibles."""
+    t = unicodedata.normalize('NFD', str(texto))
+    sin_tildes = ''.join(c for c in t if unicodedata.category(c) != 'Mn')
+    return re.sub(r'\s+', ' ', sin_tildes).strip().upper()
+
+
+def _resolver_nombre_banco(banco: str) -> str:
+    """Obtiene el nombre canónico del banco para nombres de archivo: BCP, BN o Scotia."""
+    if not banco or str(banco).strip() in ('', 'BANCO'):
+        return ''
     try:
-        return RUTA_RED.exists()
+        from bancos import nombre_corto_banco
+        return nombre_corto_banco(banco)
+    except Exception:
+        texto = str(banco).strip().upper()
+        if any(k in texto for k in ('NACION', 'BN')):
+            return 'BN'
+        if 'SCOTIA' in texto:
+            return 'Scotia'
+        if 'BCP' in texto or 'CREDITO' in texto:
+            return 'BCP'
+        return str(banco).strip()
+
+
+def _normalizar_moneda(moneda: str) -> str:
+    """Normaliza la moneda a 'Soles' o 'Dólares'."""
+    if not moneda:
+        return ''
+    m = unicodedata.normalize('NFD', str(moneda)).upper()
+    sin_tildes = ''.join(c for c in m if unicodedata.category(c) != 'Mn')
+    if any(k in sin_tildes for k in ('DOL', 'USD', 'ME')):
+        return 'Dólares'
+    if any(k in sin_tildes for k in ('SOL', 'PEN', 'MN')):
+        return 'Soles'
+    return str(moneda).strip()
+
+
+def _nombre_hoja_empresa_moneda(empresa: str, moneda: str = '') -> str:
+    """
+    Construye el nombre de la hoja según la empresa y moneda.
+    Ejemplo: 'STN Soles', 'STN Dólares'.
+    Si no se especifica moneda, devuelve solo el nombre normalizado de la empresa.
+    """
+    emp_norm = _normalizar_empresa(empresa)
+    mon_norm = _normalizar_moneda(moneda)
+    if mon_norm:
+        nombre = f"{emp_norm} {mon_norm}".strip()
+    else:
+        nombre = emp_norm
+    # Caracteres no permitidos en Excel: \ / ? * [ ] :
+    nombre = re.sub(r'[\\/?*\[\]:]', '_', nombre)
+    return nombre[:31]
+
+
+def _buscar_hoja_existente(hojas: list[str], empresa: str, moneda: str = '') -> str | None:
+    """
+    Encuentra la hoja adecuada en la lista de hojas existentes:
+    1. Coincidencia exacta con nombre generado (ej. 'STN Soles')
+    2. Coincidencia normalizada (sin tildes, case-insensitive)
+    3. Si se especificó moneda pero no existe la hoja con moneda, fallback a la hoja de solo empresa ('STN')
+    4. Si no se especificó moneda, busca la hoja de solo empresa ('STN'); si no existe, busca una que comience con la empresa
+    """
+    nombre_objetivo = _nombre_hoja_empresa_moneda(empresa, moneda)
+
+    # 1. Coincidencia exacta
+    if nombre_objetivo in hojas:
+        return nombre_objetivo
+
+    # 2. Coincidencia normalizada (sin tildes, case-insensitive)
+    norm_obj = _normalizar_texto_simple(nombre_objetivo)
+    for h in hojas:
+        if _normalizar_texto_simple(h) == norm_obj:
+            return h
+
+    # 3. Fallback a empresa sola si se especificó moneda
+    if moneda:
+        hoja_empresa = _normalizar_empresa(empresa)
+        if hoja_empresa in hojas:
+            return hoja_empresa
+        norm_emp = _normalizar_texto_simple(hoja_empresa)
+        for h in hojas:
+            if _normalizar_texto_simple(h) == norm_emp:
+                return h
+    else:
+        hoja_empresa = _normalizar_empresa(empresa)
+        norm_emp = _normalizar_texto_simple(hoja_empresa)
+        for h in hojas:
+            if _normalizar_texto_simple(h) == norm_emp:
+                return h
+        for h in hojas:
+            if _normalizar_texto_simple(h).startswith(norm_emp):
+                return h
+
+    return None
+
+
+def _resolver_ruta_archivo(
+    banco: str,
+    sufijo: str,  # 'Mov_sin_conciliar' o 'Ingreso_a_contanet'
+    ruta_base: Path = RUTA_RED,
+    modo_lectura: bool = False,
+) -> Path:
+    """
+    Resuelve la ruta del archivo Excel según el banco (BCP, BN, Scotia) y tipo de archivo.
+    Si modo_lectura=True y no existe el archivo con el nombre exacto del banco,
+    busca variantes (sin tildes, nombres largos anteriores) y finalmente
+    el archivo legacy sin prefijo de banco.
+    """
+    nom_banco = _resolver_nombre_banco(banco)
+    sufijo_limpio = "Ingreso_a_contanet" if "Ingreso" in sufijo else "Mov_sin_conciliar"
+
+    if not nom_banco:
+        nombre_default = f"{sufijo_limpio}.xlsx"
+        return ruta_base / nombre_default
+
+    nombre_archivo = f"{nom_banco}_{sufijo_limpio}.xlsx"
+    ruta_exacta = ruta_base / nombre_archivo
+
+    if not modo_lectura:
+        return ruta_exacta
+
+    # En modo lectura, si existe la ruta exacta, devolverla
+    if ruta_exacta.exists():
+        return ruta_exacta
+
+    # Variantes a buscar en modo lectura (retrocompatibilidad)
+    candidatos = [nombre_archivo]
+    if nom_banco == "Scotia":
+        candidatos.extend([
+            f"Scotiabank_{sufijo_limpio}.xlsx",
+            f"SCOTIABANK_{sufijo_limpio}.xlsx",
+        ])
+    elif nom_banco == "BN":
+        candidatos.extend([
+            f"Banco de la Nación_{sufijo_limpio}.xlsx",
+            f"Banco de la Nacion_{sufijo_limpio}.xlsx",
+            f"Banco_de_la_Nacion_{sufijo_limpio}.xlsx",
+            f"BANCO DE LA NACION_{sufijo_limpio}.xlsx",
+            f"BN_{sufijo_limpio}.xlsx",
+        ])
+    elif nom_banco == "BCP":
+        candidatos.extend([
+            f"BCP_{sufijo_limpio}.xlsx",
+            f"Banco de Crédito_{sufijo_limpio}.xlsx",
+            f"Banco de Credito_{sufijo_limpio}.xlsx",
+        ])
+
+    if sufijo_limpio == "Ingreso_a_contanet":
+        candidatos.extend([
+            f"{nom_banco}_Ingreso_contanet.xlsx",
+            "Ingreso_a_contanet.xlsx",
+            "Ingreso_contanet.xlsx",
+        ])
+    else:
+        candidatos.append("Mov_sin_conciliar.xlsx")
+
+    for cand in candidatos:
+        ruta_cand = ruta_base / cand
+        if ruta_cand.exists():
+            return ruta_cand
+
+    return ruta_exacta
+
+
+def _archivo_accesible(ruta_base: Path | None = None) -> bool:
+    """Verifica si la ruta de red (o carpeta base) es accesible."""
+    base = ruta_base if ruta_base is not None else RUTA_RED
+    try:
+        return base.exists()
     except (OSError, PermissionError):
         return False
 
@@ -77,6 +281,9 @@ def _archivo_accesible() -> bool:
 
 def cargar_pendientes(
     empresa: str,
+    *args,
+    banco: str = '',
+    moneda: str = '',
     mes_ref: int | None = None,
     anio_ref: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -91,41 +298,83 @@ def cargar_pendientes(
     para que el código de main.py pueda identificar su origen.
 
     Parámetros opcionales:
-        mes_ref  : mes del extracto bancario actual (1-12). Si se provee junto con
-                   anio_ref, los movimientos cuya fecha corresponde a ese mismo mes
-                   y año son EXCLUIDOS (ya pertenecen al período actual y podrían
-                   duplicarse). Solo se incluyen los de meses anteriores.
+        banco    : Nombre o clave del banco (ej. 'BCP', 'Scotiabank', 'BN').
+        moneda   : Moneda (ej. 'Soles (PEN)', 'Dolares (USD)', 'Soles', 'Dólares').
+        mes_ref  : mes del extracto bancario actual (1-12).
         anio_ref : año del extracto bancario actual (ej. 2026).
     """
-    nombre_hoja = _normalizar_empresa(empresa)
+    # Soportar llamadas flexibles con argumentos posicionales:
+    #   cargar_pendientes("STN", "BCP")
+    #   cargar_pendientes("STN", 1, 2026)
+    #   cargar_pendientes("STN", "BCP", 1, 2026)
+    #   cargar_pendientes("STN", "BCP", "Soles", 1, 2026)
+    if len(args) >= 1:
+        if isinstance(args[0], str):
+            banco = args[0]
+            if len(args) >= 2:
+                if isinstance(args[1], str):
+                    moneda = args[1]
+                    if len(args) >= 3 and (isinstance(args[2], int) or args[2] is None):
+                        mes_ref = args[2]
+                    if len(args) >= 4 and (isinstance(args[3], int) or args[3] is None):
+                        anio_ref = args[3]
+                elif isinstance(args[1], int) or args[1] is None:
+                    mes_ref = args[1]
+                    if len(args) >= 3 and (isinstance(args[2], int) or args[2] is None):
+                        anio_ref = args[2]
+        elif isinstance(args[0], int) or args[0] is None:
+            mes_ref = args[0]
+            if len(args) >= 2 and (isinstance(args[1], int) or args[1] is None):
+                anio_ref = args[1]
+
+    ruta_archivo = _resolver_ruta_archivo(banco, sufijo="Mov_sin_conciliar", ruta_base=RUTA_RED, modo_lectura=True)
 
     # Silenciar advertencias de openpyxl sobre estilos
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
 
-        if not _archivo_accesible():
-            print(f"  [AVISO] Ruta de red no accesible: {RUTA_RED}")
+        if not _archivo_accesible(ruta_archivo.parent):
+            print(f"  [AVISO] Ruta de red no accesible: {ruta_archivo.parent}")
             print("          Se omitira la carga de movimientos pendientes anteriores.")
             return pd.DataFrame(), pd.DataFrame()
 
-        if not RUTA_ARCHIVO.exists():
+        if not ruta_archivo.exists():
             # Primera vez: el archivo no existe aún, es normal
             return pd.DataFrame(), pd.DataFrame()
 
+        df = pd.DataFrame()
+        nombre_hoja = ""
         try:
-            xf = pd.ExcelFile(RUTA_ARCHIVO)
+            with pd.ExcelFile(ruta_archivo) as xf:
+                hojas = xf.sheet_names
+                nombre_hoja = _buscar_hoja_existente(hojas, empresa, moneda)
+                if nombre_hoja:
+                    try:
+                        df = pd.read_excel(xf, sheet_name=nombre_hoja)
+                    except Exception as e_h:
+                        print(f"  [AVISO] Error al leer la hoja '{nombre_hoja}' del archivo de pendientes: {e_h}")
+
+                # Si no se especificó moneda o la hoja encontrada estaba vacía,
+                # buscar en las hojas Soles / Dólares de la empresa
+                if (df.empty or 'ORIGEN' not in df.columns) and not moneda:
+                    emp_norm = _normalizar_texto_simple(_normalizar_empresa(empresa))
+                    hojas_emp = [h for h in hojas if _normalizar_texto_simple(h).startswith(emp_norm)]
+                    dfs_combinados = []
+                    for h in hojas_emp:
+                        try:
+                            df_h = pd.read_excel(xf, sheet_name=h)
+                            if not df_h.empty and 'ORIGEN' in df_h.columns:
+                                dfs_combinados.append(df_h)
+                                nombre_hoja = h
+                        except Exception:
+                            pass
+                    if dfs_combinados:
+                        df = pd.concat(dfs_combinados, ignore_index=True)
         except Exception as e:
             print(f"  [AVISO] No se pudo abrir el archivo de pendientes: {e}")
             return pd.DataFrame(), pd.DataFrame()
 
-        if nombre_hoja not in xf.sheet_names:
-            # Empresa sin pendientes guardados
-            return pd.DataFrame(), pd.DataFrame()
-
-        try:
-            df = pd.read_excel(RUTA_ARCHIVO, sheet_name=nombre_hoja)
-        except Exception as e:
-            print(f"  [AVISO] Error al leer la hoja '{nombre_hoja}' del archivo de pendientes: {e}")
+        if not nombre_hoja or df.empty:
             return pd.DataFrame(), pd.DataFrame()
 
     if df.empty or 'ORIGEN' not in df.columns:
@@ -191,7 +440,7 @@ def cargar_pendientes(
     n_conta = len(df_conta)
     if n_banco > 0 or n_conta > 0:
         print(f"  [INFO] Pendientes anteriores cargados: {n_banco} banco, {n_conta} conta "
-              f"(empresa: {empresa}, hoja: {nombre_hoja})")
+              f"(empresa: {empresa}, hoja: {nombre_hoja}, archivo: {ruta_archivo.name})")
 
     return df_banco, df_conta
 
@@ -202,32 +451,69 @@ def cargar_pendientes(
 
 def guardar_pendientes(
     empresa: str,
-    banco_sin_conciliar: pd.DataFrame,
-    conta_sin_conciliar: pd.DataFrame,
+    *args,
+    banco: str = '',
+    moneda: str = '',
+    banco_sin_conciliar: pd.DataFrame | None = None,
+    conta_sin_conciliar: pd.DataFrame | None = None,
 ) -> bool:
     """
-    Guarda los movimientos que NO fueron conciliados en la hoja de la empresa
-    dentro del archivo Excel de pendientes.
+    Guarda los movimientos que NO fueron conciliados en la hoja de la empresa y moneda
+    dentro del archivo Excel de pendientes del banco correspondiente.
 
-    - Crea el archivo si no existe.
-    - Crea la hoja de empresa si no existe.
-    - REEMPLAZA el contenido anterior de la hoja (chancará los datos viejos).
-
-    Parámetros:
-        empresa               : Nombre de la empresa (ej. "STN", "ITS").
-        banco_sin_conciliar   : DataFrame de filas banco que quedaron sin conciliar
-                                (banco_sin_marcar del reporte final).
-        conta_sin_conciliar   : DataFrame de filas conta que quedaron sin conciliar
-                                (conta_sin_marcar del reporte final).
+    - Crea el archivo si no existe ({Nombre del banco}_Mov_sin_conciliar.xlsx).
+    - Crea la hoja '{Empresa} {Moneda}' si no existe (ej. 'STN Soles', 'STN Dólares').
+    - Preserva todas las demás hojas (otras empresas y otras monedas).
+    - REEMPLAZA el contenido anterior de la hoja específica.
 
     Devuelve True si se guardó correctamente, False si hubo un error.
     """
-    nombre_hoja = _normalizar_empresa(empresa)
+    # Manejar llamadas posicionales flexibles:
+    #   guardar_pendientes("STN", "BCP", banco_bcp, pd.DataFrame())
+    #   guardar_pendientes("STN", banco_bcp, pd.DataFrame())
+    if len(args) >= 3 and isinstance(args[0], str):
+        banco = args[0]
+        banco_sin_conciliar = args[1]
+        conta_sin_conciliar = args[2]
+        if len(args) >= 4 and isinstance(args[3], str):
+            moneda = args[3]
+    elif len(args) == 2:
+        banco_sin_conciliar = args[0]
+        conta_sin_conciliar = args[1]
+    elif len(args) == 1:
+        if isinstance(args[0], str):
+            banco = args[0]
+        elif isinstance(args[0], pd.DataFrame):
+            banco_sin_conciliar = args[0]
 
-    if not _archivo_accesible():
-        print(f"  [AVISO] Ruta de red no accesible: {RUTA_RED}")
+    if banco_sin_conciliar is None:
+        banco_sin_conciliar = pd.DataFrame()
+    if conta_sin_conciliar is None:
+        conta_sin_conciliar = pd.DataFrame()
+
+    ruta_archivo = _resolver_ruta_archivo(banco, sufijo="Mov_sin_conciliar", ruta_base=RUTA_RED, modo_lectura=False)
+
+    try:
+        ruta_archivo.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    if not _archivo_accesible(ruta_archivo.parent):
+        print(f"  [AVISO] Ruta de red no accesible: {ruta_archivo.parent}")
         print("          No se pudieron guardar los movimientos pendientes.")
         return False
+
+    emp_norm = _normalizar_empresa(empresa)
+    hoja_soles = _nombre_hoja_empresa_moneda(emp_norm, 'Soles')
+    hoja_dolares = _nombre_hoja_empresa_moneda(emp_norm, 'Dólares')
+
+    mon_norm = _normalizar_moneda(moneda)
+    if mon_norm == 'Dólares':
+        hoja_activa = hoja_dolares
+        hoja_otra = hoja_soles
+    else:
+        hoja_activa = hoja_soles
+        hoja_otra = hoja_dolares
 
     # ── Preparar datos banco ──────────────────────────────────────────
     filas_banco = _preparar_banco_para_guardar(banco_sin_conciliar)
@@ -236,40 +522,53 @@ def guardar_pendientes(
 
     # Combinar en un único DataFrame con columna ORIGEN
     df_nuevo = pd.concat([filas_banco, filas_conta], ignore_index=True)
+    if df_nuevo.empty:
+        df_nuevo = pd.DataFrame(columns=COLS_PENDIENTES)
 
     # ── Leer el archivo existente (si existe) para preservar otras hojas ─
-    hojas_existentes: dict[str, pd.DataFrame] = {}
-    if RUTA_ARCHIVO.exists():
+    hojas_dict: dict[str, pd.DataFrame] = {}
+    if ruta_archivo.exists():
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                xf = pd.ExcelFile(RUTA_ARCHIVO)
-                for hoja in xf.sheet_names:
-                    if hoja != nombre_hoja:
-                        hojas_existentes[hoja] = pd.read_excel(RUTA_ARCHIVO, sheet_name=hoja)
+                with pd.ExcelFile(ruta_archivo) as xf:
+                    for hoja in xf.sheet_names:
+                        hojas_dict[hoja] = pd.read_excel(xf, sheet_name=hoja)
         except Exception as e:
             print(f"  [AVISO] No se pudo leer el archivo existente de pendientes: {e}")
-            # Continuar: se sobrescribirá el archivo completo
+    else:
+        # Archivo nuevo: crear 2 hojas por empresa para todas las empresas del catálogo
+        for emp in EMPRESAS_CATALOGO:
+            emp_c = _normalizar_empresa(emp)
+            h_s = _nombre_hoja_empresa_moneda(emp_c, 'Soles')
+            h_d = _nombre_hoja_empresa_moneda(emp_c, 'Dólares')
+            hojas_dict[h_s] = pd.DataFrame(columns=COLS_PENDIENTES)
+            hojas_dict[h_d] = pd.DataFrame(columns=COLS_PENDIENTES)
+
+    # Actualizar la hoja activa con los nuevos datos
+    hojas_dict[hoja_activa] = df_nuevo
+    # Asegurar que la otra hoja de la empresa exista
+    if hoja_otra not in hojas_dict:
+        hojas_dict[hoja_otra] = pd.DataFrame(columns=COLS_PENDIENTES)
 
     # ── Escribir archivo con todas las hojas ──────────────────────────
     try:
-        with pd.ExcelWriter(RUTA_ARCHIVO, engine='openpyxl', datetime_format='DD/MM/YYYY') as writer:
-            # Primero escribir la hoja actualizada de la empresa
-            df_nuevo.to_excel(writer, sheet_name=nombre_hoja, index=False)
-            # Luego preservar las demás hojas
-            for hoja, df_hoja in hojas_existentes.items():
-                df_hoja.to_excel(writer, sheet_name=hoja, index=False)
+        with pd.ExcelWriter(ruta_archivo, engine='openpyxl', datetime_format='DD/MM/YYYY') as writer:
+            for hoja_nombre, df_hoja in hojas_dict.items():
+                df_hoja.to_excel(writer, sheet_name=hoja_nombre, index=False)
+
+        _aplicar_formato_pendientes(ruta_archivo, [hoja_activa, hoja_otra])
 
         n_banco = len(filas_banco)
         n_conta = len(filas_conta)
-        print(f"\n  [OK] Pendientes guardados en: {RUTA_ARCHIVO}")
-        print(f"       Empresa: {empresa} | Hoja: {nombre_hoja}")
+        print(f"\n  [OK] Pendientes guardados en: {ruta_archivo}")
+        print(f"       Empresa: {empresa} | Hoja: {hoja_activa}")
         print(f"       {n_banco} movimiento(s) banco + {n_conta} movimiento(s) conta sin conciliar")
         return True
 
     except PermissionError:
         print(f"\n  [ERROR] No se pudo guardar el archivo de pendientes.")
-        print(f"          El archivo '{RUTA_ARCHIVO.name}' puede estar abierto por otro usuario.")
+        print(f"          El archivo '{ruta_archivo.name}' puede estar abierto por otro usuario.")
         print("          Cierrelo e intente nuevamente.")
         return False
     except Exception as e:
@@ -599,116 +898,131 @@ def inyectar_pendientes_en_conta(
 RUTA_CONCILIADOS = RUTA_RED / NOMBRE_CONCILIADOS
 
 
-def guardar_conciliados(empresa: str, df_conciliados: pd.DataFrame) -> bool:
+def guardar_conciliados(
+    empresa: str,
+    df_conciliados: pd.DataFrame | None = None,
+    *args,
+    banco: str = '',
+    moneda: str = '',
+) -> bool:
     """
     Guarda en la ruta de red el resumen de movimientos conciliados listos
     para ser ingresados en Contanet.
 
-    Fuente: hoja 'Conciliados' del CBF (reporte final).
-    Solo se incluyen filas donde '# Op. Banco' sea un valor distinto de 0
-    y no este vacio (tienen numero de operacion bancario identificable).
+    - Nombre de archivo: {Banco}_Ingreso_a_contanet.xlsx (BCP, BN o Scotia).
+    - Crea el archivo si no existe.
+    - Crea 2 hojas por empresa (una para Soles y otra para Dólares).
+    - Preserva las demás hojas (otras empresas y otra moneda).
 
     Estructura de la tabla guardada:
-      Banco | Asiento Contable | Año | Mes | Numero de Operacion
-
-    Donde:
-      - Banco             : Descripcion Banco (descripcion del movimiento bancario)
-      - Asiento Contable  : # Registro (asiento contable de Contanet)
-      - Año               : año extraido de Fecha Banco
-      - Mes               : mes (nombre) extraido de Fecha Banco
-      - Numero de Operacion: # Op. Banco
-
-    La hoja tendra como nombre el nombre normalizado de la empresa (ej. STN, CMT).
-    Si el archivo ya existe, se preservan las demas hojas (otras empresas).
-
-    Devuelve True si se guardo correctamente, False si hubo un error.
+      Asiento Contable | Año | Mes | Número de Operación | Anotación
     """
-    nombre_hoja = _normalizar_empresa(empresa)
+    if len(args) >= 1 and isinstance(args[0], str):
+        banco = args[0]
+        if len(args) >= 2 and isinstance(args[1], str):
+            moneda = args[1]
 
-    if not _archivo_accesible():
-        print(f"  [AVISO] Ruta de red no accesible: {RUTA_RED}")
+    ruta_archivo = _resolver_ruta_archivo(banco, sufijo="Ingreso_a_contanet", ruta_base=RUTA_RED, modo_lectura=False)
+
+    try:
+        ruta_archivo.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    if not _archivo_accesible(ruta_archivo.parent):
+        print(f"  [AVISO] Ruta de red no accesible: {ruta_archivo.parent}")
         print("          No se pudo guardar el archivo de conciliados para Contanet.")
         return False
 
-    if df_conciliados.empty:
-        print("  [AVISO] No hay movimientos conciliados para exportar a Contanet.")
-        return False
+    emp_norm = _normalizar_empresa(empresa)
+    hoja_soles = _nombre_hoja_empresa_moneda(emp_norm, 'Soles')
+    hoja_dolares = _nombre_hoja_empresa_moneda(emp_norm, 'Dólares')
 
-    # ── Normalizar columnas (quitar espacios) ─────────────────────────
-    df = df_conciliados.copy()
-    df.columns = [str(c).strip() for c in df.columns]
+    mon_norm = _normalizar_moneda(moneda)
+    if mon_norm == 'Dólares':
+        hoja_activa = hoja_dolares
+        hoja_otra = hoja_soles
+    else:
+        hoja_activa = hoja_soles
+        hoja_otra = hoja_dolares
 
-    # ── Filtrar: solo filas con # Op. Banco valido (distinto de 0 y no vacio) ──
-    col_op = '# Op. Banco'
-    if col_op not in df.columns:
-        print(f"  [AVISO] La hoja Conciliados no tiene la columna '{col_op}'.")
-        return False
+    # ── Preparar tabla de conciliados ─────────────────────────────────
+    tabla = pd.DataFrame(columns=COLS_CONCILIADOS)
+    if df_conciliados is not None and not df_conciliados.empty:
+        df = df_conciliados.copy()
+        df.columns = [str(c).strip() for c in df.columns]
 
-    mask_valido = df[col_op].apply(
-        lambda v: (
-            pd.notna(v) and
-            str(v).strip() not in ('', 'nan', '0', '0.0') and
-            str(v).strip() != ''
-        )
-    )
-    df_filtrado = df[mask_valido].copy()
+        col_op = '# Op. Banco'
+        if col_op in df.columns:
+            mask_valido = df[col_op].apply(
+                lambda v: (
+                    pd.notna(v) and
+                    str(v).strip() not in ('', 'nan', '0', '0.0') and
+                    str(v).strip() != ''
+                )
+            )
+            df_filtrado = df[mask_valido].copy()
 
-    if df_filtrado.empty:
-        print("  [AVISO] Ninguna fila conciliada tiene numero de operacion valido para exportar.")
-        return False
-
-    # ── Extraer año y mes de Fecha Banco ─────────────────────────────
-    fechas = pd.to_datetime(df_filtrado.get('Fecha Banco'), errors='coerce')
-    df_filtrado['_anio'] = fechas.dt.year.where(fechas.notna(), other=None)
-    df_filtrado['_mes']  = fechas.dt.month.where(fechas.notna(), other=None)
-
-    # ── Normalizar # Op. Banco: quitar .0 si es numero entero ────────
-    df_filtrado['_nro_op'] = df_filtrado[col_op].apply(
-        lambda v: str(int(float(v))) if (pd.notna(v) and str(v).strip().endswith('.0')
-                  and str(v).strip()[:-2].lstrip('-').isdigit())
-                  else str(v).strip()
-    )
-
-    # ── Construir tabla final ─────────────────────────────────────────
-    tabla = pd.DataFrame({
-        'Asiento Contable'    : df_filtrado.get('# Registro', '').fillna('').astype(str).str.strip(),
-        'Año'                 : df_filtrado['_anio'],
-        'Mes'                 : df_filtrado['_mes'],
-        'Número de Operación' : df_filtrado['_nro_op'],
-        'Anotación'           : df_filtrado.get('Anotacion', df_filtrado.get('Anotación', '')).fillna('').astype(str).str.strip(),
-    }).reset_index(drop=True)
+            if not df_filtrado.empty:
+                fechas = pd.to_datetime(df_filtrado.get('Fecha Banco'), errors='coerce')
+                df_filtrado['_anio'] = fechas.dt.year.where(fechas.notna(), other=None)
+                df_filtrado['_mes']  = fechas.dt.month.where(fechas.notna(), other=None)
+                df_filtrado['_nro_op'] = df_filtrado[col_op].apply(
+                    lambda v: str(int(float(v))) if (pd.notna(v) and str(v).strip().endswith('.0')
+                              and str(v).strip()[:-2].lstrip('-').isdigit())
+                              else str(v).strip()
+                )
+                tabla = pd.DataFrame({
+                    'Asiento Contable'    : df_filtrado.get('# Registro', '').fillna('').astype(str).str.strip(),
+                    'Año'                 : df_filtrado['_anio'],
+                    'Mes'                 : df_filtrado['_mes'],
+                    'Número de Operación' : df_filtrado['_nro_op'],
+                    'Anotación'           : df_filtrado.get('Anotacion', df_filtrado.get('Anotación', '')).fillna('').astype(str).str.strip(),
+                }).reset_index(drop=True)
 
     # ── Leer el archivo existente para preservar otras hojas ─────────
-    hojas_existentes: dict[str, pd.DataFrame] = {}
-    if RUTA_CONCILIADOS.exists():
+    hojas_dict: dict[str, pd.DataFrame] = {}
+    if ruta_archivo.exists():
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                xf = pd.ExcelFile(RUTA_CONCILIADOS)
-                for hoja in xf.sheet_names:
-                    if hoja != nombre_hoja:
-                        hojas_existentes[hoja] = pd.read_excel(RUTA_CONCILIADOS, sheet_name=hoja)
+                with pd.ExcelFile(ruta_archivo) as xf:
+                    for hoja in xf.sheet_names:
+                        hojas_dict[hoja] = pd.read_excel(xf, sheet_name=hoja)
         except Exception as e:
             print(f"  [AVISO] No se pudo leer el archivo existente de conciliados: {e}")
+    else:
+        # Archivo nuevo: crear 2 hojas por empresa para todas las empresas del catálogo
+        for emp in EMPRESAS_CATALOGO:
+            emp_c = _normalizar_empresa(emp)
+            h_s = _nombre_hoja_empresa_moneda(emp_c, 'Soles')
+            h_d = _nombre_hoja_empresa_moneda(emp_c, 'Dólares')
+            hojas_dict[h_s] = pd.DataFrame(columns=COLS_CONCILIADOS)
+            hojas_dict[h_d] = pd.DataFrame(columns=COLS_CONCILIADOS)
+
+    # Actualizar la hoja activa con los datos
+    hojas_dict[hoja_activa] = tabla
+    # Asegurar que la otra hoja de la empresa exista
+    if hoja_otra not in hojas_dict:
+        hojas_dict[hoja_otra] = pd.DataFrame(columns=COLS_CONCILIADOS)
 
     # ── Escribir archivo ──────────────────────────────────────────────
     try:
-        with pd.ExcelWriter(RUTA_CONCILIADOS, engine='openpyxl', datetime_format='DD/MM/YYYY') as writer:
-            tabla.to_excel(writer, sheet_name=nombre_hoja, index=False)
-            for hoja, df_hoja in hojas_existentes.items():
-                df_hoja.to_excel(writer, sheet_name=hoja, index=False)
+        with pd.ExcelWriter(ruta_archivo, engine='openpyxl', datetime_format='DD/MM/YYYY') as writer:
+            for hoja_nombre, df_hoja in hojas_dict.items():
+                df_hoja.to_excel(writer, sheet_name=hoja_nombre, index=False)
 
-        # Aplicar formato de cabecera al archivo
-        _aplicar_formato_conciliados_contanet(RUTA_CONCILIADOS, nombre_hoja)
+        # Aplicar formato visual
+        _aplicar_formato_conciliados_contanet(ruta_archivo, [hoja_activa, hoja_otra])
 
         n = len(tabla)
-        print(f"\n  [OK] Conciliados para Contanet guardados en: {RUTA_CONCILIADOS}")
-        print(f"       Empresa: {empresa} | Hoja: {nombre_hoja} | {n} movimiento(s)")
+        print(f"\n  [OK] Conciliados para Contanet guardados en: {ruta_archivo}")
+        print(f"       Empresa: {empresa} | Hoja: {hoja_activa} | {n} movimiento(s)")
         return True
 
     except PermissionError:
         print(f"\n  [ERROR] No se pudo guardar el archivo de conciliados para Contanet.")
-        print(f"          El archivo '{RUTA_CONCILIADOS.name}' puede estar abierto por otro usuario.")
+        print(f"          El archivo '{ruta_archivo.name}' puede estar abierto por otro usuario.")
         print("          Cierrelo e intente nuevamente.")
         return False
     except Exception as e:
@@ -716,48 +1030,109 @@ def guardar_conciliados(empresa: str, df_conciliados: pd.DataFrame) -> bool:
         return False
 
 
-def _aplicar_formato_conciliados_contanet(ruta: Path, nombre_hoja: str) -> None:
-    """Aplica formato visual basico a la hoja de conciliados para Contanet."""
+def _aplicar_formato_conciliados_contanet(ruta: Path, nombre_hoja: str | list[str] | None = None) -> None:
+    """Aplica formato visual básico a la(s) hoja(s) de conciliados para Contanet."""
     try:
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
         from openpyxl.utils import get_column_letter
 
         wb = openpyxl.load_workbook(ruta)
-        if nombre_hoja not in wb.sheetnames:
-            return
+        if nombre_hoja is None:
+            dest_hojas = wb.sheetnames
+        elif isinstance(nombre_hoja, str):
+            dest_hojas = [nombre_hoja]
+        else:
+            dest_hojas = list(nombre_hoja)
 
-        ws = wb[nombre_hoja]
         thin = Side(style='thin', color='D9D9D9')
         borde = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-        # Cabecera: fondo verde oscuro (color Contanet)
-        for cell in ws[1]:
-            cell.font      = Font(bold=True, color='FFFFFF', size=10)
-            cell.fill      = PatternFill('solid', fgColor='375623')
-            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-            cell.border    = borde
-        ws.row_dimensions[1].height = 28
+        for nh in dest_hojas:
+            if nh not in wb.sheetnames:
+                continue
+            ws = wb[nh]
 
-        # Datos: bordes y alineacion
-        for row in ws.iter_rows(min_row=2):
-            for cell in row:
+            # Cabecera: fondo verde oscuro (color Contanet)
+            for cell in ws[1]:
+                cell.font      = Font(bold=True, color='FFFFFF', size=10)
+                cell.fill      = PatternFill('solid', fgColor='375623')
+                cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
                 cell.border    = borde
-                cell.alignment = Alignment(vertical='center')
-                # Año y Mes centrados
-                col_name = str(ws.cell(row=1, column=cell.column).value or '')
-                if col_name in ('Año', 'Mes'):
-                    cell.alignment = Alignment(horizontal='center', vertical='center')
+            ws.row_dimensions[1].height = 28
 
-        # Autoajuste de columnas
-        for col in ws.columns:
-            max_len = max(
-                (len(str(cell.value)) for cell in col if cell.value is not None),
-                default=10
-            )
-            ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 45)
+            # Datos: bordes y alineacion
+            for row in ws.iter_rows(min_row=2):
+                for cell in row:
+                    cell.border    = borde
+                    cell.alignment = Alignment(vertical='center')
+                    col_name = str(ws.cell(row=1, column=cell.column).value or '')
+                    if col_name in ('Año', 'Mes'):
+                        cell.alignment = Alignment(horizontal='center', vertical='center')
 
-        ws.freeze_panes = 'A2'
+            # Autoajuste de columnas
+            for col in ws.columns:
+                max_len = max(
+                    (len(str(cell.value)) for cell in col if cell.value is not None),
+                    default=10
+                )
+                ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 45)
+
+            ws.freeze_panes = 'A2'
+
         wb.save(ruta)
+        wb.close()
     except Exception:
-        pass  # El formato es opcional; no fallar si hay error
+        pass
+
+
+def _aplicar_formato_pendientes(ruta: Path, nombre_hoja: str | list[str] | None = None) -> None:
+    """Aplica formato visual básico a la(s) hoja(s) de movimientos sin conciliar."""
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+
+        wb = openpyxl.load_workbook(ruta)
+        if nombre_hoja is None:
+            dest_hojas = wb.sheetnames
+        elif isinstance(nombre_hoja, str):
+            dest_hojas = [nombre_hoja]
+        else:
+            dest_hojas = list(nombre_hoja)
+
+        thin = Side(style='thin', color='D9D9D9')
+        borde = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        for nh in dest_hojas:
+            if nh not in wb.sheetnames:
+                continue
+            ws = wb[nh]
+
+            # Cabecera: fondo azul marino (#1B365D), blanco negrita
+            for cell in ws[1]:
+                cell.font      = Font(bold=True, color='FFFFFF', size=10)
+                cell.fill      = PatternFill('solid', fgColor='1B365D')
+                cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                cell.border    = borde
+            ws.row_dimensions[1].height = 26
+
+            # Datos: bordes y alineación
+            for row in ws.iter_rows(min_row=2):
+                for cell in row:
+                    cell.border = borde
+                    cell.alignment = Alignment(vertical='center')
+
+            for col in ws.columns:
+                max_len = max(
+                    (len(str(cell.value)) for cell in col if cell.value is not None),
+                    default=10
+                )
+                ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 3, 40)
+
+            ws.freeze_panes = 'A2'
+
+        wb.save(ruta)
+        wb.close()
+    except Exception:
+        pass

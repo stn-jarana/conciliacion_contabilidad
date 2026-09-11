@@ -39,6 +39,7 @@ def generar_reporte_final(
     empresa: str = '',
     ruc: str = '',
     moneda: str = '',
+    banco: str = '',
 ) -> Path:
     """
     Lee el Excel inicial trabajado por el especialista y genera el reporte final.
@@ -50,18 +51,59 @@ def generar_reporte_final(
         empresa      : Nombre de la empresa (tomado del menú de selección).
         ruc          : RUC de la empresa (tomado del menú de selección).
         moneda       : Moneda seleccionada (ej. 'Soles (PEN)', 'Dolares (USD)').
+        banco        : Banco seleccionado (ej. 'BCP', 'BN', 'Scotia').
     """
     if ruta_salida is None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         ruta_salida = Path(f"Conciliacion_Final_{ts}.xlsx")
 
     # ── Validar que el archivo tenga la hoja Anexar1 ─────────────────
-    xl = pd.ExcelFile(ruta_inicial)
-    if 'Anexar1' not in xl.sheet_names:
+    with pd.ExcelFile(ruta_inicial) as xl:
+        sheet_names = xl.sheet_names
+
+    if 'Anexar1' not in sheet_names:
         raise ValueError(
             f"El archivo '{ruta_inicial.name}' no contiene la hoja 'Anexar1'.\n"
             "Asegurese de cargar el reporte inicial ya trabajado por el especialista."
         )
+
+    # Deducir banco si no se especificó
+    if not banco or banco == 'BANCO':
+        try:
+            wb_meta = openpyxl.load_workbook(ruta_inicial, read_only=True, data_only=True)
+            if 'CONTANET' in wb_meta.sheetnames:
+                ws_meta = wb_meta['CONTANET']
+                for col_idx in range(1, 40):
+                    etiq = ws_meta.cell(row=1, column=col_idx).value
+                    if str(etiq).strip() == '__BANCO__':
+                        val = ws_meta.cell(row=2, column=col_idx).value
+                        if val:
+                            banco = str(val).strip()
+                        break
+            wb_meta.close()
+        except Exception:
+            pass
+
+    if not banco or banco == 'BANCO':
+        nombre_arch = ruta_inicial.name.upper()
+        if 'BCP' in nombre_arch or 'CREDITO' in nombre_arch:
+            banco = 'BCP'
+        elif 'SCOTIA' in nombre_arch:
+            banco = 'Scotia'
+        elif 'BN' in nombre_arch or 'NACION' in nombre_arch:
+            banco = 'BN'
+
+    if not moneda:
+        nombre_arch = ruta_inicial.name.upper()
+        if any(k in nombre_arch for k in ('DOL', 'USD')):
+            moneda = 'Dolares (USD)'
+        elif any(k in nombre_arch for k in ('SOL', 'PEN')):
+            moneda = 'Soles (PEN)'
+
+    if not empresa:
+        partes = ruta_inicial.stem.split('_')
+        if len(partes) >= 2 and partes[0] in ('CBI', 'CBF'):
+            empresa = partes[1]
 
     # ── Leer Anexar1 ──────────────────────────────────────────────────
     anexar1 = pd.read_excel(ruta_inicial, sheet_name='Anexar1')
@@ -278,22 +320,28 @@ def generar_reporte_final(
     # ── Imprimir resumen en consola ───────────────────────────────────
     _imprimir_resumen_consola(saldos, partidas, ruta_salida)
 
-    # ── Guardar movimientos sin conciliar (Mov_sin_conciliar.xlsx) ────
+    # ── Guardar movimientos sin conciliar ({Banco}_Mov_sin_conciliar.xlsx) ────
     try:
         from pendientes import guardar_pendientes
         guardar_pendientes(
             empresa=empresa,
+            banco=banco,
+            moneda=moneda,
             banco_sin_conciliar=banco_sin_marcar,
             conta_sin_conciliar=conta_sin_marcar,
         )
     except Exception as e_pend:
         print(f"  [AVISO] No se pudieron guardar los movimientos pendientes: {e_pend}")
 
-    # ── Exportar conciliados para Contanet (Ingreso_a_contanet.xlsx) ──
+    # ── Exportar conciliados para Contanet ({Banco}_Ingreso_a_contanet.xlsx) ──
     try:
         from pendientes import guardar_conciliados
-        if not conciliados.empty:
-            guardar_conciliados(empresa=empresa, df_conciliados=conciliados)
+        guardar_conciliados(
+            empresa=empresa,
+            df_conciliados=conciliados,
+            banco=banco,
+            moneda=moneda,
+        )
     except Exception as e_conc:
         print(f"  [AVISO] No se pudo guardar el archivo de conciliados para Contanet: {e_conc}")
 
