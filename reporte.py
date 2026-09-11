@@ -145,6 +145,11 @@ def _preparar_tab_banco(bank: pd.DataFrame) -> pd.DataFrame:
     mask_sin_monto = df['Monto-Banco'].fillna(0) == 0
     df['Anotación'] = ''
     df.loc[mask_sin_monto, 'Anotación'] = 'Mov. sin monto (0)'
+    # Propagar bandera de pendiente (movimientos de meses anteriores)
+    if '_pendiente' in bank.columns:
+        df['_pendiente'] = bank['_pendiente'].fillna(False).values
+    else:
+        df['_pendiente'] = False
     return df
 
 
@@ -165,6 +170,11 @@ def _preparar_tab_contanet(conta: pd.DataFrame) -> pd.DataFrame:
     df.loc[mask_sin_monto, 'Anotación'] = 'Mov. sin monto (0)'
     # Quitar columnas auxiliares de cálculo
     df = df.drop(columns=['Ingreso', 'Egreso'])
+    # Propagar bandera de pendiente (movimientos de meses anteriores)
+    if '_pendiente' in conta.columns:
+        df['_pendiente'] = conta['_pendiente'].fillna(False).values
+    else:
+        df['_pendiente'] = False
     return df
 
 
@@ -774,6 +784,126 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
 
     return banco_ext.drop(columns=['_matched']), conta_ext.drop(columns=['_matched'])
 
+
+def _sugerencias_meses_anteriores(
+    banco_ext: pd.DataFrame,
+    conta_ext: pd.DataFrame,
+    moneda: str = "Dolares (USD)",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Segunda pasada de sugerencias para los movimientos que provienen de meses
+    anteriores (flag '_pendiente' == True) y que NO fueron conciliados por el
+    algoritmo principal.
+
+    Regla: solo se compara por monto (sin importar la fecha), porque el
+    movimiento pendiente tiene fecha antigua y no va a coincidir en fecha con
+    los del mes actual.
+
+    Casos:
+      1. abs(monto_pend) == abs(monto_mes_actual)  →  "Sugerido: Solo monto meses anteriores"
+      2. abs(diferencia) en diferencias_comision    →  "Sugerido: Solo monto meses anteriores
+                                                         (comisión <DIF>)"
+      3. Sin coincidencia                           →  queda como partida abierta
+                                                        (Mov. solo en banco / Mov. solo en conta)
+    Solo se considera un pendiente si aún NO tiene sugerencia ni está conciliado
+    (MAR != 'X' y Anotación no empieza con 'Sugerido').
+    """
+    diferencias_set = _diferencias_comision(moneda)
+
+    if '_suggested' not in conta_ext.columns:
+        conta_ext['_suggested'] = False
+
+    # ── Pendientes de BANCO vs movimientos del mes actual en CONTA ────
+    pend_b_mask = (
+        banco_ext.get('_pendiente', pd.Series([False] * len(banco_ext))).fillna(False).astype(bool) &
+        (banco_ext['MAR'] != 'X') &
+        (~banco_ext['Anotación'].astype(str).str.startswith('Sugerido'))
+    )
+    for b_idx in banco_ext[pend_b_mask].index:
+        m_b = float(banco_ext.at[b_idx, 'Monto-Banco'] or 0)
+        if m_b == 0:
+            continue
+
+        # Candidatos: movimientos del MES ACTUAL (no pendientes), no conciliados
+        candidatos_c = conta_ext[
+            (~conta_ext.get('_pendiente', pd.Series([False] * len(conta_ext))).fillna(False).astype(bool)) &
+            (conta_ext['MAR'] != 'X') &
+            (~conta_ext['_suggested']) &
+            (~conta_ext['Anotación'].astype(str).str.startswith('Sugerido'))
+        ]
+
+        mejor_idx = None
+        mejor_dif = None
+        for c_idx, row_c in candidatos_c.iterrows():
+            m_c = float(row_c.get('Monto-Conta', 0) or 0)
+            dif = round(abs(abs(m_b) - abs(m_c)), 2)
+            if dif == 0.0:
+                mejor_idx = c_idx
+                mejor_dif = 0.0
+                break  # coincidencia exacta, no buscar más
+            if dif in diferencias_set and mejor_idx is None:
+                mejor_idx = c_idx
+                mejor_dif = dif
+
+        if mejor_idx is not None:
+            op_link = f"SUG-PEND-B{b_idx}-C{mejor_idx}"
+            if mejor_dif == 0.0:
+                anot = 'Sugerido: Solo monto meses anteriores'
+            else:
+                anot = f'Sugerido: Solo monto meses anteriores (comisión {mejor_dif:.2f})'
+            banco_ext.at[b_idx, '# Operación2'] = op_link
+            conta_ext.at[mejor_idx, '# Operación2'] = op_link
+            banco_ext.at[b_idx, 'Anotación'] = anot
+            conta_ext.at[mejor_idx, 'Anotación'] = anot
+            conta_ext.at[mejor_idx, '_suggested'] = True
+
+    # ── Pendientes de CONTA vs movimientos del mes actual en BANCO ────
+    pend_c_mask = (
+        conta_ext.get('_pendiente', pd.Series([False] * len(conta_ext))).fillna(False).astype(bool) &
+        (conta_ext['MAR'] != 'X') &
+        (~conta_ext['_suggested']) &
+        (~conta_ext['Anotación'].astype(str).str.startswith('Sugerido'))
+    )
+    for c_idx in conta_ext[pend_c_mask].index:
+        m_c = float(conta_ext.at[c_idx, 'Monto-Conta'] or 0)
+        if m_c == 0:
+            continue
+
+        # Candidatos: movimientos del MES ACTUAL (no pendientes), no conciliados
+        candidatos_b = banco_ext[
+            (~banco_ext.get('_pendiente', pd.Series([False] * len(banco_ext))).fillna(False).astype(bool)) &
+            (banco_ext['MAR'] != 'X') &
+            (~banco_ext['Anotación'].astype(str).str.startswith('Sugerido'))
+        ]
+
+        mejor_idx = None
+        mejor_dif = None
+        for b_idx, row_b in candidatos_b.iterrows():
+            m_b = float(row_b.get('Monto-Banco', 0) or 0)
+            dif = round(abs(abs(m_b) - abs(m_c)), 2)
+            if dif == 0.0:
+                mejor_idx = b_idx
+                mejor_dif = 0.0
+                break
+            if dif in diferencias_set and mejor_idx is None:
+                mejor_idx = b_idx
+                mejor_dif = dif
+
+        if mejor_idx is not None:
+            op_link = f"SUG-PEND-C{c_idx}-B{mejor_idx}"
+            if mejor_dif == 0.0:
+                anot = 'Sugerido: Solo monto meses anteriores'
+            else:
+                anot = f'Sugerido: Solo monto meses anteriores (comisión {mejor_dif:.2f})'
+            conta_ext.at[c_idx, '# Operación2'] = op_link
+            banco_ext.at[mejor_idx, '# Operación2'] = op_link
+            conta_ext.at[c_idx, 'Anotación'] = anot
+            banco_ext.at[mejor_idx, 'Anotación'] = anot
+            conta_ext.at[c_idx, '_suggested'] = True
+
+    return banco_ext, conta_ext
+
+
 def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: str = "Dolares (USD)") -> pd.DataFrame:
     """
     Une Tab_Banco y Tab_Contanet verticalmente con todas las columnas combinadas.
@@ -818,6 +948,15 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
     
     # ── APLICAR ALGORITMO DE CONCILIACIÓN AUTOMÁTICA ──
     banco_ext, conta_ext = _conciliacion_automatica(banco_ext, conta_ext, moneda=moneda)
+
+    # ── SUGERENCIAS POR MESES ANTERIORES (pendientes de conciliaciones previas) ──
+    # Se ejecuta DESPUÉS de la conciliación normal para que los movimientos del
+    # mes actual que ya se conciliaron no sean reutilizados por esta segunda pasada.
+    banco_ext, conta_ext = _sugerencias_meses_anteriores(banco_ext, conta_ext, moneda=moneda)
+
+    # Limpiar columna auxiliar _suggested si quedó de _sugerencias_meses_anteriores
+    if '_suggested' in conta_ext.columns:
+        conta_ext = conta_ext.drop(columns=['_suggested'])
 
     # Asegurar que todas las columnas existan en ambos para evitar warnings
     for c in cols:

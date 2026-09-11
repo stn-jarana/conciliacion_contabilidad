@@ -465,9 +465,25 @@ def flujo_reporte_inicial(config: dict) -> None:
     # ── Cargar movimientos pendientes de la conciliación anterior ─────
     try:
         from pendientes import cargar_pendientes, inyectar_pendientes_en_banco, inyectar_pendientes_en_conta
-        df_banco_pend, df_conta_pend = cargar_pendientes(config.get('empresa', ''))
-        bank  = inyectar_pendientes_en_banco(bank,  df_banco_pend)
-        conta = inyectar_pendientes_en_conta(conta, df_conta_pend)
+
+        # Calcular mes y año de referencia a partir del banco ya sanitizado
+        mes_ref  = None
+        anio_ref = None
+        try:
+            fechas_banco_ref = pd.to_datetime(bank['fecha'], errors='coerce').dropna()
+            if not fechas_banco_ref.empty:
+                mes_ref  = int(fechas_banco_ref.iloc[0].month)
+                anio_ref = int(fechas_banco_ref.iloc[0].year)
+        except Exception:
+            pass
+
+        df_banco_pend, df_conta_pend = cargar_pendientes(
+            config.get('empresa', ''),
+            mes_ref=mes_ref,
+            anio_ref=anio_ref,
+        )
+        bank  = inyectar_pendientes_en_banco(bank,  df_banco_pend, mes_ref=mes_ref, anio_ref=anio_ref)
+        conta = inyectar_pendientes_en_conta(conta, df_conta_pend, mes_ref=mes_ref, anio_ref=anio_ref)
     except Exception as e_pend:
         print(f"  [AVISO] No se pudieron cargar los pendientes anteriores: {e_pend}")
 
