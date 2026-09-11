@@ -18,6 +18,8 @@ Sistema automatizado en Python para el procesamiento, cruce, sugerencia intelige
   - Reforestadora Iñaupari
   - TECA Peruvian Group
   - DIONISO
+- **Selección y separación por banco**: En cada ejecución se elige **BCP**, **Scotiabank** o **Banco de la Nación (BN)**. Los movimientos de Contanet, pendientes y exportaciones para Contanet se mantienen separados por banco.
+- **Lectura de extractos por banco**: Admite el importe firmado del BCP y los formatos con columnas separadas de débitos/cargos y créditos/abonos, usados habitualmente por Scotiabank y BN.
 - **Conciliación Automática de Alta Certidumbre**:
   - Cruce por código de operación igual.
   - Extracción de N° de operación contable dentro de la descripción bancaria.
@@ -62,11 +64,12 @@ uv run python main.py
 ```
 
 ### Flujo de Ejecución:
-1. **Seleccionar Empresa y Moneda**: Elija la entidad y la divisa a procesar.
+1. **Seleccionar Empresa, Moneda y Banco**: Elija la entidad, la divisa y el banco a procesar (BCP, Scotiabank o BN).
 2. **Generar Reporte Inicial (Opción 1)**:
    - Ingrese la ruta del Excel del Banco (ej. extracto consolidado).
    - Ingrese la ruta del Excel de Contabilidad (exportación Contanet).
    - El sistema generará el archivo de trabajo `Conciliacion_Inicial_...xlsx`.
+   - Solo se incluirán los registros de Contanet cuyo campo **Giro** corresponda al banco seleccionado.
 3. **Revisión del Especialista (Excel)**:
    - Abra el archivo `Conciliacion_Inicial_...xlsx` en la hoja **`Anexar1`**.
    - Para sugerencias aceptadas: Deje la **`X`** pre-marcada en la columna `Conciliar`.

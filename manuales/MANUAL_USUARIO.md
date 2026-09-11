@@ -1,7 +1,7 @@
 # Manual de Usuario — Sistema de Conciliación Bancaria
 
-**Versión:** 2.0  
-**Fecha de última actualización:** Agosto 2026  
+**Versión:** 2.1
+**Fecha de última actualización:** Septiembre 2026
 **Empresas Soportadas:** STN, ITS, CMT del Sur, Dynamitex, DINSURA, Perú Commerce, INFOSUR, Thimble Sourcing (TST), Reforestadora Iñaupari, TECA Peruvian Group, DIONISO.
 
 ---
@@ -9,6 +9,8 @@
 ## 1. ¿Qué hace este programa?
 
 El sistema automatiza el proceso de **conciliación bancaria multi-empresa**: cruza los movimientos del estado de cuenta bancario contra los registros exportados del sistema contable (Contanet), aplica reglas inteligentes de coincidencia automática y sugerencias, y genera archivos de trabajo en Excel y PDF para la revisión del especialista contable.
+
+En cada ejecución se selecciona el banco: **BCP**, **Scotiabank** o **Banco de la Nación (BN)**. Antes de realizar el cruce, el sistema conserva únicamente los registros del reporte Contanet cuyo campo **Giro** corresponde al banco elegido. Esto impide que partidas de una cuenta de otro banco se mezclen en la conciliación.
 
 El flujo consta de **dos etapas**:
 
@@ -30,6 +32,8 @@ El flujo consta de **dos etapas**:
 - Archivos de entrada en formato Excel (`.xlsx`):
   - **Estado de Cuenta Bancario**: Archivo consolidado con las pestañas de cada empresa/moneda (ej. `STN DOL`, `STN SOL`, `ITS DOL`, `CMT SOL`, `P.COMMERCE`, `REF.IÑAPARI`, `TECA`, etc.).
   - **Reporte Contable**: Exportación de Contanet sin alterar.
+
+El extracto debe contener una columna de **Fecha**, una de **Descripción/Detalle/Concepto** y una de importe. El importe puede venir como una columna con signo (BCP/BN) o en dos columnas de **Débito/Cargo** y **Crédito/Abono** (Scotiabank/BN). Se recomienda conservar también **Saldo** y **N° de operación, documento o referencia**.
 
 ### Ejecución rápida
 Abra una consola en la carpeta del proyecto (`C:\Users\jarana\repositorio\proyect_conta\prueba_conta`) y ejecute:
@@ -57,6 +61,16 @@ Al iniciar el sistema, podrá elegir entre las empresas configuradas y sus pesta
 | 9 | **Reforestadora Iñaupari** | Soles (PEN) | `REF.IÑAPARI` |
 | 10 | **TECA Peruvian Group** | Soles (PEN) | `TECA` |
 | 11 | **DIONISO** | Soles (PEN) | `DIONISO` |
+
+Después de seleccionar la empresa y moneda, el sistema mostrará este menú:
+
+1. **BCP**
+2. **Scotiabank**
+3. **Banco de la Nación**
+
+La selección se aplica tanto al reporte inicial como al final. El nombre del archivo incluye la clave del banco (`BCP`, `SCOTIABANK` o `BN`) y el reporte final valida que coincida con el banco guardado en el reporte inicial.
+
+Los movimientos pendientes se guardan con la columna `BANCO`, de modo que al procesar Scotiabank o BN no se cargan pendientes de BCP. Las exportaciones `Ingreso_a_contanet.xlsx` se guardan en hojas separadas con el formato `EMPRESA_BANCO`, por ejemplo `STN_BCP`, `STN_SCOTIABANK` y `STN_BN`.
 
 ---
 
