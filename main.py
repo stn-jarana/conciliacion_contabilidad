@@ -219,11 +219,34 @@ EMPRESAS = [
 
 
 # ══════════════════════════════════════════════════════════
-# FUNCIONES DE MENÚ
+# FUNCIONES DE MENÚ Y CARGA DE ARCHIVOS
 # ══════════════════════════════════════════════════════════
 
+BANCOS_SOPORTADOS = [
+    {"id": "BCP",        "nombre": "BCP (Excel .xlsx)",                "formato": ".xlsx"},
+    {"id": "SCOTIABANK", "nombre": "Scotiabank (PDF .pdf)",            "formato": ".pdf"},
+    {"id": "BN",         "nombre": "Banco de la Nación (Excel .xlsx)", "formato": ".xlsx"},
+]
+
+
+def seleccionar_banco() -> dict | None:
+    """Muestra el menú de bancos soportados; devuelve el banco elegido o None si se cancela."""
+    while True:
+        print("\nSeleccione el BANCO:\n")
+        for k, b in enumerate(BANCOS_SOPORTADOS, 1):
+            print(f"  {k}. {b['nombre']}")
+        print("  0. Volver")
+        print()
+        opcion = input("Opcion: ").strip()
+        if opcion == "0":
+            return None
+        if opcion.isdigit() and 1 <= int(opcion) <= len(BANCOS_SOPORTADOS):
+            return BANCOS_SOPORTADOS[int(opcion) - 1]
+        print("  X Opcion invalida, intente de nuevo.\n")
+
+
 def seleccionar_empresa() -> dict:
-    """Muestra el menú de empresas y monedas; devuelve la configuración elegida."""
+    """Muestra el menú de empresas, monedas y bancos; devuelve la configuración elegida."""
     while True:
         print("=" * 60)
         print("  CONCILIACION BANCARIA")
@@ -268,12 +291,17 @@ def seleccionar_empresa() -> dict:
                 print(f"\n  X La opcion '{moneda['nombre']}' aun no esta disponible.\n")
                 continue
 
-            print(f"\n  >> {empresa['nombre']} - {moneda['nombre']}\n")
-            # Incluir nombre de empresa y RUC en el config para el reporte
+            banco_sel = seleccionar_banco()
+            if banco_sel is None:
+                continue
+
+            print(f"\n  >> {empresa['nombre']} - {moneda['nombre']} - {banco_sel['nombre']}\n")
+            # Incluir nombre de empresa, RUC y banco en el config para el reporte
             return {
                 **moneda,
                 'empresa': empresa['nombre'],
                 'ruc'    : empresa.get('ruc', ''),
+                'banco'  : banco_sel['id'],
             }
 
 
@@ -313,25 +341,50 @@ def pedir_archivo(mensaje: str) -> Path:
             return path
 
 
-# ══════════════════════════════════════════════════════════
-# FLUJO — REPORTE INICIAL
-# ══════════════════════════════════════════════════════════
+def pedir_archivo_banco(banco: str) -> Path:
+    """Solicita una ruta de archivo para el banco (.xlsx para BCP/BN, .pdf o .xlsx para Scotia)."""
+    banco_upper = (banco or '').upper()
+    if 'SCOTIA' in banco_upper:
+        extensiones = ('.pdf', '.xlsx', '.xls')
+        mensaje = "Ruta del estado de cuenta de SCOTIABANK (.pdf / .xlsx): "
+        error_msg = "  X El archivo debe ser PDF (.pdf) o Excel (.xlsx)"
+    else:
+        nombre_display = 'BANCO DE LA NACIÓN' if 'BN' in banco_upper or 'NACION' in banco_upper else 'BCP'
+        extensiones = ('.xlsx', '.xls')
+        mensaje = f"Ruta del estado de cuenta de {nombre_display} (.xlsx): "
+        error_msg = "  X El archivo debe ser Excel (.xlsx o .xls)"
 
-def flujo_reporte_inicial(config: dict) -> None:
-    """Carga, sanitiza y genera el reporte inicial de conciliacion."""
-    from reporte import generar_reporte_inicial
+    while True:
+        ruta = input(mensaje).strip().strip('"').strip("'")
+        path = Path(ruta)
+        if not path.exists():
+            print(f"  X No se encontro el archivo: {ruta}")
+        elif path.suffix.lower() not in extensiones:
+            print(error_msg)
+        else:
+            return path
 
-    print("-" * 60)
-    file_bank  = pedir_archivo("Ruta del estado de cuenta del BANCO (.xlsx): ")
-    file_conta = pedir_archivo("Ruta del reporte de CONTABILIDAD (.xlsx)  : ")
-    print()
 
-    # ── Carga raw ─────────────────────────────────────────────────────
-    # Buscar automáticamente la hoja correcta
+def _cargar_banco_scotiabank(ruta_banco: Path) -> tuple[pd.DataFrame, float | None]:
+    """
+    Carga el estado de cuenta de Scotiabank desde PDF (o Excel como fallback).
+    Devuelve (bank_df, saldo_final). bank_df tiene las columnas internas del motor.
+    """
+    if ruta_banco.suffix.lower() == '.pdf':
+        from SCOTIABANK.extract_data_pdf import leer_pdf_scotiabank
+        resultado = leer_pdf_scotiabank(ruta_banco)
+        return resultado['movimientos'], resultado['saldo_final']
+    else:
+        from bancos import leer_estado_bancario
+        df, _ = leer_estado_bancario(ruta_banco, 'SCOTIABANK')
+        return df, None
+
+
+def _cargar_banco_bcp(file_bank: Path, config: dict) -> pd.DataFrame:
+    """Carga y sanitiza el estado de cuenta BCP desde un archivo Excel."""
     xls = pd.ExcelFile(file_bank)
 
-    sheet_bank = config["sheet_bank"]
-
+    sheet_bank = config.get("sheet_bank", "")
     if isinstance(sheet_bank, (tuple, list)):
         hoja_encontrada = next(
             (h for h in sheet_bank if h in xls.sheet_names),
@@ -341,20 +394,17 @@ def flujo_reporte_inicial(config: dict) -> None:
         hoja_encontrada = sheet_bank
 
     if hoja_encontrada is None:
-        raise ValueError(
-            f"No se encontró ninguna de las hojas: {sheet_bank}"
-        )
+        if xls.sheet_names:
+            hoja_encontrada = xls.sheet_names[0]
+        else:
+            raise ValueError(f"No se encontró ninguna hoja válida en {file_bank}")
 
     bank_raw = pd.read_excel(
         file_bank,
         sheet_name=hoja_encontrada,
-        skiprows=config["skip_bank"]
+        skiprows=config.get("skip_bank", 4)
     )
 
-    # bank_raw  = pd.read_excel(file_bank,  sheet_name=config['sheet_bank'], skiprows=config['skip_bank'])
-    conta_raw = pd.read_excel(file_conta, skiprows=config['skip_conta'])
-
-    # ── Sanitización banco ────────────────────────────────────────────
     bank = bank_raw.copy()
     bank.columns = [
         'fecha', 'fecha_valuta', 'descripcion', 'monto', 'saldo',
@@ -364,23 +414,89 @@ def flujo_reporte_inicial(config: dict) -> None:
     bank['fecha_valuta'] = pd.to_datetime(bank['fecha_valuta'], format='%d/%m/%Y', errors='coerce')
     bank['ingreso']      = bank['monto'].clip(lower=0)
     bank['egreso']       = bank['monto'].clip(upper=0).abs()
-    bank = bank.drop(columns=['fecha_valuta', 'referencia'])
-    bank['descripcion']  = bank['descripcion'].str.strip()
+    bank = bank.drop(columns=['fecha_valuta', 'referencia'], errors='ignore')
+    bank['descripcion']  = bank['descripcion'].astype(str).str.strip()
     bank = bank.sort_values('fecha').reset_index(drop=True)
+    return bank
+
+
+# ══════════════════════════════════════════════════════════
+# FLUJO — REPORTE INICIAL
+# ══════════════════════════════════════════════════════════
+
+def flujo_reporte_inicial(config: dict) -> None:
+    """Carga, sanitiza y genera el reporte inicial de conciliacion."""
+    from reporte import generar_reporte_inicial
+
+    print("-" * 60)
+    banco_config = config.get('banco', 'BCP')
+    file_bank  = pedir_archivo_banco(banco_config)
+    file_conta = pedir_archivo("Ruta del reporte de CONTABILIDAD (.xlsx)  : ")
+    print()
+
+    # ── Carga y sanitización banco ────────────────────────────────────
+    if banco_config == 'SCOTIABANK':
+        bank, saldo_banco_final = _cargar_banco_scotiabank(file_bank)
+        banco_nombre = 'Scotia'
+    elif banco_config == 'BN':
+        from bancos import leer_estado_bancario
+        bank, _ = leer_estado_bancario(file_bank, 'BN')
+        saldo_banco_final = None
+        banco_nombre = 'BN'
+    else:
+        bank = _cargar_banco_bcp(file_bank, config)
+        saldo_banco_final = None
+        banco_nombre = _extraer_nombre_banco(file_conta, config.get('skip_conta', 11))
+        if banco_nombre in ('', 'BANCO'):
+            banco_nombre = 'BCP'
+
+    # ── Carga contabilidad ────────────────────────────────────────────
+    conta_raw = pd.read_excel(file_conta, skiprows=config['skip_conta'])
 
     # ── Sanitización contabilidad ─────────────────────────────────────
-    conta = conta_raw.copy()
-    conta.columns = [
-        'col_vacia', 'nro_registro', 'fecha_mov', 'medio_pago',
-        'nro_operacion', 'giro', 'glosa', 'ingreso', 'egreso',
-        'fecha_conciliacion', 'conciliado'
-    ]
-    conta = conta.drop(columns=['col_vacia'])
-
-    # Extraer el Saldo Contable Final ANTES de filtrar las filas de saldo
-    # Contanet exporta el saldo en el texto: "Saldo Contable (Final): 175,002.61"
-    # que cae en la columna 'nro_registro' (col B del Excel) con fecha_mov = NaN.
+    # Mapeo dinámico por nombre de columna (normalizado sin tildes/mayúsculas).
+    # Soporta 11 columnas (formato estándar), 14 (con MAR/SUB/MONTO de Scotiabank)
+    # o cualquier variante futura. Columnas faltantes se llenan con None.
+    import unicodedata as _ud
     import re as _re
+
+    def _norm_col(txt: str) -> str:
+        s = str(txt).strip().lower()
+        return ''.join(c for c in _ud.normalize('NFD', s) if _ud.category(c) != 'Mn')
+
+    # Reglas de mapeo: (nombre_interno, predicado sobre nombre normalizado)
+    _REGLAS_CONTA = [
+        ('nro_registro',       lambda n: 'registro' in n and 'fecha' not in n),
+        ('fecha_mov',          lambda n: 'movimiento' in n or ('f.' in n and 'mov' in n)),
+        ('medio_pago',         lambda n: 'medio' in n or 'pago' in n),
+        ('nro_operacion',      lambda n: 'operac' in n),
+        ('giro',               lambda n: n == 'giro'),
+        ('glosa',              lambda n: 'glosa' in n or 'concepto' in n),
+        ('ingreso',            lambda n: n == 'ingreso'),
+        ('egreso',             lambda n: n == 'egreso'),
+        ('fecha_conciliacion', lambda n: 'concilia' in n and ('f.' in n or 'fecha' in n)),
+        ('conciliado',         lambda n: 'conciliad' in n),
+    ]
+
+    col_map: dict[str, str] = {}   # nombre_interno → nombre_real_en_df
+    for col_real in conta_raw.columns:
+        norm = _norm_col(str(col_real))
+        for nombre_interno, predicado in _REGLAS_CONTA:
+            if nombre_interno not in col_map and predicado(norm):
+                col_map[nombre_interno] = col_real
+                break
+
+    # Construir DataFrame con columnas internas; las que falten quedan en None
+    # (no bloquean la conciliación)
+    import pandas as _pd_local
+    conta = _pd_local.DataFrame(index=conta_raw.index)
+    for nombre_interno, _ in _REGLAS_CONTA:
+        if nombre_interno in col_map:
+            conta[nombre_interno] = conta_raw[col_map[nombre_interno]]
+        else:
+            conta[nombre_interno] = None
+
+    # ── Extraer Saldo Contable Final ANTES de filtrar filas de saldo ──
     saldo_contable_final = None
 
     # Patrón 1: "Saldo Contable (Final): XXXXX" en la columna nro_registro
@@ -391,12 +507,28 @@ def flujo_reporte_inicial(config: dict) -> None:
     if not filas_saldo_texto.empty:
         try:
             texto = str(filas_saldo_texto['nro_registro'].iloc[0])
-            # Extraer el número que sigue al ':'
             m = _re.search(r':\s*([\d,\.]+)', texto)
             if m:
                 saldo_contable_final = float(m.group(1).replace(',', ''))
         except Exception:
             pass
+
+    # Patrón 1b: buscar en cualquier columna del raw (cuando nro_registro no mapea)
+    if saldo_contable_final is None:
+        for _col_raw in conta_raw.columns:
+            _mask = conta_raw[_col_raw].astype(str).str.contains(
+                r'Saldo\s+Contable\s*\(Final\)', case=False, na=False
+            )
+            _filas = conta_raw[_mask]
+            if not _filas.empty:
+                try:
+                    texto = str(_filas[_col_raw].iloc[0])
+                    m = _re.search(r':\s*([\d,\.]+)', texto)
+                    if m:
+                        saldo_contable_final = float(m.group(1).replace(',', ''))
+                        break
+                except Exception:
+                    pass
 
     # Patrón 2 (fallback): "Saldo" en nro_registro y "Final" en fecha_mov (formato antiguo)
     if saldo_contable_final is None:
@@ -433,9 +565,28 @@ def flujo_reporte_inicial(config: dict) -> None:
             conta[col].astype(str).str.replace(',', '', regex=False).str.strip(),
             errors='coerce'
         ).fillna(0)
-    conta['conciliado'] = conta['conciliado'].str.upper().str.strip().map({'SI': True, 'NO': False})
-    for col in ['giro', 'glosa', 'medio_pago']:
-        conta[col] = conta[col].str.strip()
+    conta['conciliado'] = conta['conciliado'].astype(str).str.upper().str.strip().map(
+        {'SI': True, 'NO': False}
+    ).fillna(False)
+    for col in ['giro', 'glosa', 'medio_pago', 'nro_operacion', 'nro_registro']:
+        conta[col] = conta[col].fillna('').astype(str).str.strip()
+
+    # ── Filtrar movimientos de otros bancos si aparecen en Giro ───────
+    # Si la contabilidad incluye explícitamente otros bancos en la columna Giro,
+    # se omiten para evitar cruces indebidos, conservando siempre a proveedores/terceros.
+    try:
+        from bancos import BANCOS, _contiene_alias, clave_banco
+        clave_act = clave_banco(banco_nombre)
+        otros_bancos = [cb for cb in BANCOS if cb != clave_act]
+        mascara_otro_banco = conta['giro'].map(
+            lambda val: any(_contiene_alias(val, ob) for ob in otros_bancos)
+        )
+        if mascara_otro_banco.any():
+            descartados = int(mascara_otro_banco.sum())
+            conta = conta[~mascara_otro_banco].reset_index(drop=True)
+            print(f"  [INFO] Se omitieron {descartados} registro(s) de otros bancos en la columna 'Giro'.")
+    except Exception:
+        pass
 
     # ── Filtrar registros de meses anteriores ("Información anterior") ─────
     # El mes de referencia lo determinamos a partir del banco ya sanitizado.
@@ -477,7 +628,6 @@ def flujo_reporte_inicial(config: dict) -> None:
         except Exception:
             pass
 
-        banco_nombre = _extraer_nombre_banco(file_conta, config['skip_conta'])
         df_banco_pend, df_conta_pend = cargar_pendientes(
             config.get('empresa', ''),
             banco=banco_nombre,
@@ -525,8 +675,14 @@ def flujo_reporte_final(config: dict) -> None:
     file_inicial = pedir_archivo("Ruta del Excel trabajado (.xlsx): ")
     print()
 
-    # Extraer banco y mes/año desde el archivo inicial para construir el nombre CBF
-    banco_nombre = 'BANCO'
+    # Extraer banco y mes/año desde config o desde el archivo inicial para construir el nombre CBF
+    banco_nombre = config.get('banco') or 'BANCO'
+    try:
+        from bancos import nombre_corto_banco
+        if banco_nombre in ('SCOTIABANK', 'BCP', 'BN'):
+            banco_nombre = nombre_corto_banco(banco_nombre)
+    except Exception:
+        pass
     # Intentar leer banco desde la hoja CONTANET (metadato guardado en el reporte inicial)
     try:
         import openpyxl as _opxl
@@ -581,10 +737,12 @@ def flujo_reporte_final(config: dict) -> None:
 # PUNTO DE ENTRADA
 # ══════════════════════════════════════════════════════════
 
-config = seleccionar_empresa()
-accion = seleccionar_accion()
 
-if accion == "1":
-    flujo_reporte_inicial(config)
-elif accion == "2":
-    flujo_reporte_final(config)
+if __name__ == '__main__':
+    config = seleccionar_empresa()
+    accion = seleccionar_accion()
+
+    if accion == "1":
+        flujo_reporte_inicial(config)
+    elif accion == "2":
+        flujo_reporte_final(config)
