@@ -136,8 +136,10 @@ EMPRESAS = [
         "nombre"  : "STN",
         "ruc"     : "20376729126",
         "monedas" : [
-            {"nombre": "Dolares (USD)", "sheet_bank": ("STN DOL", "STN USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
-            {"nombre": "Soles (PEN)",   "sheet_bank": ("STN SOL", "STN SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Dolares (USD)", "sheet_bank": ("STN DOL", "STN USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True,
+             "cuentas": {"BCP": "194-1162203-0-23", "SCOTIABANK": "001-0137451"}},
+            {"nombre": "Soles (PEN)",   "sheet_bank": ("STN SOL", "STN SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True,
+             "cuentas": {}},
         ],
     },
     {
@@ -153,7 +155,8 @@ EMPRESAS = [
         "ruc"     : "20537658471",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": ("CMT DOL", "CMT USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
-            {"nombre": "Soles (PEN)",   "sheet_bank": ("CMT SOL", "CMT SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": ("CMT SOL", "CMT SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True,
+             "cuentas": {"BN": "00-000-513598"}},
         ],
     },
     {
@@ -223,9 +226,9 @@ EMPRESAS = [
 # ══════════════════════════════════════════════════════════
 
 BANCOS_SOPORTADOS = [
-    {"id": "BCP",        "nombre": "BCP (Excel .xlsx)",                "formato": ".xlsx"},
-    {"id": "SCOTIABANK", "nombre": "Scotiabank (PDF .pdf)",            "formato": ".pdf"},
-    {"id": "BN",         "nombre": "Banco de la Nación (Excel .xlsx)", "formato": ".xlsx"},
+    {"id": "BCP",        "nombre": "BCP (Excel .xlsx)",                               "formato": ".xlsx"},
+    {"id": "SCOTIABANK", "nombre": "Scotiabank (PDF .pdf)",                           "formato": ".pdf"},
+    {"id": "BN",         "nombre": "Banco de la Nación (PDF .pdf / Excel .xlsx)",     "formato": ".pdf"},
 ]
 
 
@@ -342,16 +345,19 @@ def pedir_archivo(mensaje: str) -> Path:
 
 
 def pedir_archivo_banco(banco: str) -> Path:
-    """Solicita una ruta de archivo para el banco (.xlsx para BCP/BN, .pdf o .xlsx para Scotia)."""
+    """Solicita una ruta de archivo para el banco (.xlsx para BCP, .pdf o .xlsx para Scotia y BN)."""
     banco_upper = (banco or '').upper()
     if 'SCOTIA' in banco_upper:
         extensiones = ('.pdf', '.xlsx', '.xls')
         mensaje = "Ruta del estado de cuenta de SCOTIABANK (.pdf / .xlsx): "
         error_msg = "  X El archivo debe ser PDF (.pdf) o Excel (.xlsx)"
+    elif 'BN' in banco_upper or 'NACION' in banco_upper:
+        extensiones = ('.pdf', '.xlsx', '.xls')
+        mensaje = "Ruta del estado de cuenta de BANCO DE LA NACIÓN (.pdf / .xlsx): "
+        error_msg = "  X El archivo debe ser PDF (.pdf) o Excel (.xlsx)"
     else:
-        nombre_display = 'BANCO DE LA NACIÓN' if 'BN' in banco_upper or 'NACION' in banco_upper else 'BCP'
         extensiones = ('.xlsx', '.xls')
-        mensaje = f"Ruta del estado de cuenta de {nombre_display} (.xlsx): "
+        mensaje = "Ruta del estado de cuenta de BCP (.xlsx): "
         error_msg = "  X El archivo debe ser Excel (.xlsx o .xls)"
 
     while True:
@@ -378,6 +384,22 @@ def _cargar_banco_scotiabank(ruta_banco: Path) -> tuple[pd.DataFrame, float | No
         from bancos import leer_estado_bancario
         df, _ = leer_estado_bancario(ruta_banco, 'SCOTIABANK')
         return df, None
+
+
+def _cargar_banco_bn(ruta_banco: Path) -> tuple[pd.DataFrame, float | None]:
+    """
+    Carga el estado de cuenta de Banco de la Nación desde PDF (o Excel como fallback).
+    Devuelve (bank_df, saldo_final). bank_df tiene las columnas internas del motor.
+    """
+    if ruta_banco.suffix.lower() == '.pdf':
+        from BN.extract_data_bn import leer_pdf_bn
+        resultado = leer_pdf_bn(ruta_banco)
+        return resultado['movimientos'], resultado['saldo_final']
+    else:
+        from bancos import leer_estado_bancario
+        df, _ = leer_estado_bancario(ruta_banco, 'BN')
+        return df, None
+
 
 
 def _cargar_banco_bcp(file_bank: Path, config: dict) -> pd.DataFrame:
@@ -439,9 +461,7 @@ def flujo_reporte_inicial(config: dict) -> None:
         bank, saldo_banco_final = _cargar_banco_scotiabank(file_bank)
         banco_nombre = 'Scotia'
     elif banco_config == 'BN':
-        from bancos import leer_estado_bancario
-        bank, _ = leer_estado_bancario(file_bank, 'BN')
-        saldo_banco_final = None
+        bank, saldo_banco_final = _cargar_banco_bn(file_bank)
         banco_nombre = 'BN'
     else:
         bank = _cargar_banco_bcp(file_bank, config)
@@ -614,19 +634,22 @@ def flujo_reporte_inicial(config: dict) -> None:
     conta = conta.sort_values('fecha_mov').reset_index(drop=True)
 
     # ── Cargar movimientos pendientes de la conciliación anterior ─────
+    # Calcular mes y año de referencia ANTES de inyectar pendientes para que
+    # el nombre del archivo use el mes correcto (no el de los pendientes inyectados).
+    mes_ref  = None
+    anio_ref = None
+    try:
+        fechas_banco_ref = pd.to_datetime(bank['fecha'], errors='coerce').dropna()
+        if not fechas_banco_ref.empty:
+            mes_ref  = int(fechas_banco_ref.iloc[0].month)
+            anio_ref = int(fechas_banco_ref.iloc[0].year)
+    except Exception:
+        pass
+
     try:
         from pendientes import cargar_pendientes, inyectar_pendientes_en_banco, inyectar_pendientes_en_conta
 
-        # Calcular mes y año de referencia a partir del banco ya sanitizado
-        mes_ref  = None
-        anio_ref = None
-        try:
-            fechas_banco_ref = pd.to_datetime(bank['fecha'], errors='coerce').dropna()
-            if not fechas_banco_ref.empty:
-                mes_ref  = int(fechas_banco_ref.iloc[0].month)
-                anio_ref = int(fechas_banco_ref.iloc[0].year)
-        except Exception:
-            pass
+        # mes_ref / anio_ref ya calculados arriba
 
         df_banco_pend, df_conta_pend = cargar_pendientes(
             config.get('empresa', ''),
@@ -641,7 +664,19 @@ def flujo_reporte_inicial(config: dict) -> None:
         print(f"  [AVISO] No se pudieron cargar los pendientes anteriores: {e_pend}")
 
     # ── Generar reporte ───────────────────────────────────────────────
-    mes_anio     = _mes_anio_desde_bank(bank)
+    # NOTA: el mes/año se determina a partir de los datos originales del banco
+    # (antes de inyectar pendientes), usando mes_ref/anio_ref ya calculados arriba.
+    # Si se usara _mes_anio_desde_bank(bank) aquí, los pendientes del mes anterior
+    # (ordenados por fecha) harían que iloc[0] apunte a un mes incorrecto.
+    if mes_ref is not None and anio_ref is not None:
+        _meses = {
+            1: 'ENERO', 2: 'FEBRERO', 3: 'MARZO', 4: 'ABRIL',
+            5: 'MAYO', 6: 'JUNIO', 7: 'JULIO', 8: 'AGOSTO',
+            9: 'SETIEMBRE', 10: 'OCTUBRE', 11: 'NOVIEMBRE', 12: 'DICIEMBRE'
+        }
+        mes_anio = f"{_meses.get(mes_ref, 'MES')}_{anio_ref}"
+    else:
+        mes_anio = _mes_anio_desde_bank(bank)
     ruta_salida  = _construir_nombre_archivo(
         'CBI',
         empresa=config.get('empresa', 'Empresa'),
@@ -649,6 +684,8 @@ def flujo_reporte_inicial(config: dict) -> None:
         moneda=config['nombre'],
         mes_anio=mes_anio,
     )
+    # Obtener número de cuenta según banco seleccionado
+    cuenta_num = config.get('cuentas', {}).get(banco_config, '')
     generar_reporte_inicial(
         bank,
         conta,
@@ -657,6 +694,7 @@ def flujo_reporte_inicial(config: dict) -> None:
         moneda=config['nombre'],
         saldo_contable_final=saldo_contable_final,
         banco=banco_nombre,
+        cuenta=cuenta_num,
     )
 
 
@@ -720,6 +758,10 @@ def flujo_reporte_final(config: dict) -> None:
         mes_anio=mes_anio,
     )
 
+    # Obtener número de cuenta desde el config (fallback si el CBI no tiene __CUENTA__)
+    banco_id = config.get('banco', '').upper()  # ej. 'SCOTIABANK', 'BCP', 'BN'
+    cuenta_config = config.get('cuentas', {}).get(banco_id, '')
+
     try:
         generar_reporte_final(
             file_inicial,
@@ -728,6 +770,7 @@ def flujo_reporte_final(config: dict) -> None:
             ruc=config.get('ruc', ''),
             moneda=config.get('nombre', ''),
             banco=banco_nombre,
+            cuenta=cuenta_config,
         )
     except ValueError as e:
         print(f"\n  X Error: {e}\n")

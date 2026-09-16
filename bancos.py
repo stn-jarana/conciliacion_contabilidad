@@ -178,15 +178,28 @@ def _buscar_columna(columnas: list[str], *patrones: str) -> str | None:
 
 
 def _fila_cabecera(datos: pd.DataFrame) -> int | None:
-    """Ubica la cabecera en los primeros renglones de un extracto Excel."""
-    claves = ("FECHA", "DESCRIPCION", "DETALLE", "CONCEPTO", "MONTO", "IMPORTE", "DEBITO", "CREDITO", "CARGO", "ABONO", "SALDO", "OPERACION")
+    """Ubica la cabecera en los primeros renglones de un extracto Excel.
+
+    Soporta también el formato del Banco de la Nación con columnas
+    DIA / CODIFICACION NRO CHEQUE / CARGOS / ABONOS / SALDOS.
+    """
+    claves = ("FECHA", "DESCRIPCION", "DETALLE", "CONCEPTO", "MONTO", "IMPORTE",
+              "DEBITO", "CREDITO", "CARGO", "ABONO", "SALDO", "OPERACION",
+              # columnas específicas del formato BN Excel
+              "DIA", "CODIFICACION", "CARGOS", "ABONOS", "SALDOS")
     mejor_fila: int | None = None
     mejor_puntaje = 0
     for indice in range(min(len(datos), 40)):
         celdas = [normalizar_texto(valor) for valor in datos.iloc[indice].tolist()]
         puntaje = sum(any(clave in celda for celda in celdas) for clave in claves)
-        tiene_fecha = any("FECHA" in celda for celda in celdas)
-        tiene_importe = any(clave in celda for celda in celdas for clave in ("MONTO", "IMPORTE", "DEBITO", "CREDITO", "CARGO", "ABONO"))
+        # Columna de fecha: FECHA o DIA (formato BN)
+        tiene_fecha = any("FECHA" in celda or celda == "DIA" for celda in celdas)
+        # Columna de importe: montos, cargos/abonos, etc.
+        tiene_importe = any(
+            clave in celda
+            for celda in celdas
+            for clave in ("MONTO", "IMPORTE", "DEBITO", "CREDITO", "CARGO", "ABONO", "CARGOS", "ABONOS")
+        )
         if tiene_fecha and tiene_importe and puntaje > mejor_puntaje:
             mejor_fila, mejor_puntaje = indice, puntaje
     return mejor_fila if mejor_puntaje >= 2 else None
@@ -232,13 +245,28 @@ def leer_estado_bancario(
     datos = datos.dropna(axis=1, how="all")
 
     columnas = list(datos.columns)
-    col_fecha = _buscar_columna(columnas, "fecha", "fecha operacion", "fecha transaccion", "fecha movimiento")
-    col_descripcion = _buscar_columna(columnas, "descripcion", "detalle", "concepto", "glosa", "movimiento")
+
+    # Detectar si es el formato específico del Banco de la Nación Excel
+    # (columnas: DIA, CODIFICACION NRO CHEQUE, CARGOS, ABONOS, SALDOS)
+    _cols_norm = {c: normalizar_texto(c) for c in columnas}
+    _es_formato_bn = any("DIA" == n for n in _cols_norm.values()) and any(
+        "CODIFICACION" in n for n in _cols_norm.values()
+    )
+
+    # Mapeo de columnas: soporta formato estándar y formato específico BN
+    col_fecha = _buscar_columna(columnas, "fecha", "fecha operacion", "fecha transaccion",
+                                "fecha movimiento", "dia")
+    col_descripcion = _buscar_columna(columnas, "descripcion", "detalle", "concepto", "glosa",
+                                      "movimiento", "codificacion nro cheque", "codificacion",
+                                      # formato BN Excel: Trans. = tipo de transacción
+                                      "trans", "tipo", "operacion tipo")
     col_monto = _buscar_columna(columnas, "monto", "importe", "monto operacion", "importe operacion")
-    col_credito = _buscar_columna(columnas, "credito", "abono", "haber", "ingreso", "deposito")
-    col_debito = _buscar_columna(columnas, "debito", "cargo", "debe", "egreso", "retiro")
-    col_saldo = _buscar_columna(columnas, "saldo", "balance")
-    col_operacion = _buscar_columna(columnas, "nro operacion", "numero operacion", "operacion", "nro documento", "numero documento", "documento", "referencia", "secuencia")
+    col_credito = _buscar_columna(columnas, "credito", "abono", "abonos", "haber", "ingreso", "deposito")
+    col_debito = _buscar_columna(columnas, "debito", "cargo", "cargos", "debe", "egreso", "retiro")
+    col_saldo = _buscar_columna(columnas, "saldo", "saldos", "balance")
+    col_operacion = _buscar_columna(columnas, "nro operacion", "numero operacion", "operacion",
+                                    "nro documento", "numero documento", "documento",
+                                    "referencia", "secuencia")
     col_fecha_valuta = _buscar_columna(columnas, "fecha valuta", "fecha valor")
     col_sucursal = _buscar_columna(columnas, "sucursal", "agencia", "oficina")
     col_hora = _buscar_columna(columnas, "hora")
@@ -252,19 +280,71 @@ def leer_estado_bancario(
 
     if col_credito is not None or col_debito is not None:
         credito = _a_numero(datos[col_credito]).fillna(0) if col_credito else pd.Series(0.0, index=datos.index)
-        debito = _a_numero(datos[col_debito]).fillna(0) if col_debito else pd.Series(0.0, index=datos.index)
-        monto = credito - debito
+        debito_raw = _a_numero(datos[col_debito]).fillna(0) if col_debito else pd.Series(0.0, index=datos.index)
+
+        # Si la columna de débito/cargo ya tiene valores negativos (como en el formato BN Excel
+        # donde Cargo = -8000), tratarlos como importes ya firmados y simplemente sumar.
+        # Si son positivos (formato estándar), restarlos del crédito para obtener el neto.
+        debito_no_cero = debito_raw[debito_raw != 0]
+        if len(debito_no_cero) > 0 and (debito_no_cero < 0).mean() > 0.5:
+            # La mayoría de cargos son negativos → ya firmados, sumar directamente
+            monto = credito + debito_raw
+        else:
+            monto = credito - debito_raw
     else:
         monto = _a_numero(datos[col_monto])
 
+    # En el formato BN Excel, el nro_operacion compuesto se arma como:
+    #   Trans. - Documento - Fecha_sin_separadores
+    # Ejemplo: "CHEQUE - 17615586 - 28082026"
+    # Esto aplica tanto al formato DIA/CODIFICACION/CARGOS/ABONOS/SALDOS
+    # como al formato Fecha/Trans./Documento/Cargo/Abono del BN.
+    _clave = clave_banco(banco)
+    # Activar el nro_operacion compuesto para cualquier archivo XLS del Banco de la Nación,
+    # independientemente de si se encontró col_operacion. Esto produce identificadores más
+    # descriptivos: "CHEQUE - 17615586 - 28082026"
+    _es_formato_bn_xls = _clave == "BN" and col_descripcion is not None and col_fecha is not None
+
+    if _es_formato_bn_xls and col_descripcion and col_fecha:
+        def _construir_nro_op_bn(row) -> str:
+            desc = str(row[col_descripcion] or "").strip()
+            fecha_val = str(row[col_fecha] or "").strip()
+            # Quitar separadores de la fecha (01/08/2026 o 2026.08.31 → 01082026)
+            fecha_limpia = fecha_val.replace("/", "").replace("-", "").replace(".", "").strip()
+            # Incluir número de documento si existe
+            doc = ""
+            if col_operacion:
+                doc = str(row[col_operacion] or "").strip()
+                doc = doc.replace(".0", "").strip() if doc.endswith(".0") else doc
+            partes = [p for p in [desc, doc, fecha_limpia] if p and p not in ("0", "nan")]
+            return " - ".join(partes) if partes else ""
+        nro_op_serie = datos.apply(_construir_nro_op_bn, axis=1)
+    else:
+        nro_op_serie = _a_texto(datos[col_operacion]) if col_operacion else pd.Series("", index=datos.index)
+
+    # Detectar si la columna de fecha usa formato YYYY.MM.DD o similar (año primero)
+    # para no aplicar dayfirst=True incorrectamente.
+    _sample_fechas = datos[col_fecha].dropna().head(5).astype(str)
+    _yearfirst = any(
+        len(s) >= 4 and s[:4].isdigit() and int(s[:4]) > 1900
+        for s in _sample_fechas
+    )
+    _fecha_kwargs: dict = {"errors": "coerce"}
+    if _yearfirst:
+        _fecha_kwargs["format"] = "mixed"
+        _fecha_kwargs["yearfirst"] = True
+    else:
+        _fecha_kwargs["dayfirst"] = True
+        _fecha_kwargs["format"] = "mixed"
+
     resultado = pd.DataFrame({
-        "fecha": pd.to_datetime(datos[col_fecha], dayfirst=True, errors="coerce"),
-        "fecha_valuta": pd.to_datetime(datos[col_fecha_valuta], dayfirst=True, errors="coerce") if col_fecha_valuta else pd.NaT,
+        "fecha": pd.to_datetime(datos[col_fecha], **_fecha_kwargs),
+        "fecha_valuta": pd.to_datetime(datos[col_fecha_valuta], **_fecha_kwargs) if col_fecha_valuta else pd.NaT,
         "descripcion": _a_texto(datos[col_descripcion]),
         "monto": monto,
         "saldo": _a_numero(datos[col_saldo]) if col_saldo else 0.0,
         "sucursal": _a_texto(datos[col_sucursal]) if col_sucursal else "",
-        "nro_operacion": _a_texto(datos[col_operacion]) if col_operacion else "",
+        "nro_operacion": nro_op_serie,
         "hora": _a_texto(datos[col_hora]) if col_hora else "",
         "usuario": _a_texto(datos[col_usuario]) if col_usuario else "",
     })

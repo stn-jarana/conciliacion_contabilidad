@@ -40,6 +40,7 @@ def generar_reporte_final(
     ruc: str = '',
     moneda: str = '',
     banco: str = '',
+    cuenta: str = '',
 ) -> Path:
     """
     Lee el Excel inicial trabajado por el especialista y genera el reporte final.
@@ -52,6 +53,7 @@ def generar_reporte_final(
         ruc          : RUC de la empresa (tomado del menú de selección).
         moneda       : Moneda seleccionada (ej. 'Soles (PEN)', 'Dolares (USD)').
         banco        : Banco seleccionado (ej. 'BCP', 'BN', 'Scotia').
+        cuenta       : Número de cuenta bancaria (fallback si no está en CONTANET).
     """
     if ruta_salida is None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -67,22 +69,29 @@ def generar_reporte_final(
             "Asegurese de cargar el reporte inicial ya trabajado por el especialista."
         )
 
-    # Deducir banco si no se especificó
-    if not banco or banco == 'BANCO':
-        try:
-            wb_meta = openpyxl.load_workbook(ruta_inicial, read_only=True, data_only=True)
-            if 'CONTANET' in wb_meta.sheetnames:
-                ws_meta = wb_meta['CONTANET']
-                for col_idx in range(1, 40):
-                    etiq = ws_meta.cell(row=1, column=col_idx).value
-                    if str(etiq).strip() == '__BANCO__':
-                        val = ws_meta.cell(row=2, column=col_idx).value
-                        if val:
-                            banco = str(val).strip()
-                        break
-            wb_meta.close()
-        except Exception:
-            pass
+    # Deducir banco y cuenta si no se especificaron
+    cuenta_leida = ''  # cuenta leída desde la hoja CONTANET del archivo
+    try:
+        wb_meta = openpyxl.load_workbook(ruta_inicial, read_only=True, data_only=True)
+        if 'CONTANET' in wb_meta.sheetnames:
+            ws_meta = wb_meta['CONTANET']
+            headers_meta = {
+                str(ws_meta.cell(row=1, column=c).value).strip(): c
+                for c in range(1, 40)
+            }
+            if (not banco or banco == 'BANCO') and '__BANCO__' in headers_meta:
+                val = ws_meta.cell(row=2, column=headers_meta['__BANCO__']).value
+                if val:
+                    banco = str(val).strip()
+            if '__CUENTA__' in headers_meta:
+                val = ws_meta.cell(row=2, column=headers_meta['__CUENTA__']).value
+                if val:
+                    cuenta_leida = str(val).strip()
+        wb_meta.close()
+    except Exception:
+        pass
+    # La cuenta del archivo tiene prioridad; el parámetro actúa como fallback
+    cuenta = cuenta_leida or cuenta
 
     if not banco or banco == 'BANCO':
         nombre_arch = ruta_inicial.name.upper()
@@ -255,7 +264,9 @@ def generar_reporte_final(
     meta = _extraer_metadatos(ruta_inicial, anexar1,
                               empresa_param=empresa,
                               ruc_param=ruc,
-                              moneda_param=moneda)
+                              moneda_param=moneda,
+                              banco_param=banco,
+                              cuenta_param=cuenta)
 
     # ── Calcular saldos para el formato final ────────────────────────
     saldos = _calcular_saldos(
@@ -299,11 +310,17 @@ def generar_reporte_final(
     for row in df_conc.itertuples(index=False):
         ws_conc.append(list(row))
 
+    # Eliminar la hoja fija 'CONCILIACION FINAL' de la plantilla antes de guardar,
+    # para que _escribir_hoja_conciliacion_final pueda crear una versión dinámica
+    # sin límite de filas por sección.
+    if 'CONCILIACION FINAL' in wb.sheetnames:
+        del wb['CONCILIACION FINAL']
+
     wb.save(ruta_salida)
 
-    # ── Actualizar hoja CONCILIACION FINAL ─────────────────────────────
-    _actualizar_hoja_conciliacion_final(
-        ruta_salida, meta, saldos, partidas, ruta_inicial=ruta_inicial
+    # ── Escribir hoja CONCILIACION FINAL dinámica (sin límite de filas) ──
+    _escribir_hoja_conciliacion_final(
+        ruta_salida, meta, saldos, partidas
     )
 
     # ── Aplicar formato visual a la hoja Conciliados ─────────────────
@@ -502,17 +519,28 @@ def _extraer_metadatos(
     empresa_param: str = '',
     ruc_param: str = '',
     moneda_param: str = '',
+    banco_param: str = '',
+    cuenta_param: str = '',
 ) -> dict:
     """
     Construye el dict de metadatos para el encabezado del reporte.
     Los valores pasados como parámetros tienen PRIORIDAD sobre los inferidos
     desde el contenido del archivo.
     """
+    # Resolver el nombre completo del banco a partir del código corto
+    nombre_banco_display = ''
+    if banco_param:
+        try:
+            from bancos import nombre_banco as _nombre_banco
+            nombre_banco_display = _nombre_banco(banco_param)
+        except Exception:
+            nombre_banco_display = banco_param
+
     meta = {
         'empresa'       : empresa_param.strip(),
         'ruc'           : ruc_param.strip(),
-        'banco'         : 'BANCO DE CREDITO',
-        'cuenta'        : '',
+        'banco'         : nombre_banco_display or banco_param or 'BANCO DE CREDITO',
+        'cuenta'        : cuenta_param.strip(),
         'moneda'        : moneda_param.strip(),
         'mes'           : '',
         'fecha_reporte' : datetime.now().strftime('%d/%m/%Y'),
@@ -1490,64 +1518,6 @@ def _escribir_hoja_conciliacion_final(
     ws.row_dimensions[fila].height = 4
     fila += 1
 
-    # ── (-) COMISIONES EN BANCO ───────────────────────────────────────
-    _COLOR_COM_SEC = 'ED7D31'   # naranja
-    ws.row_dimensions[fila].height = 15
-    _c(ws, fila, 2, '(-) Comisiones en Banco',
-       bold=True, size=10, bg=_COLOR_COM_SEC, color=_COLOR_WHITE, border=_BORDE_THIN)
-    _merge(ws, fila, 2, fila, 6)
-    _c(ws, fila, 7, None, bg=_COLOR_COM_SEC, border=_BORDE_THIN)
-    total_com_banco = sum(p['monto'] for p in partidas.get('comisiones_banco', []))
-    _c(ws, fila, 8, total_com_banco if total_com_banco else 0, bold=True, size=10,
-       align_h='right', bg=_COLOR_COM_SEC, color=_COLOR_WHITE,
-       num_fmt='#,##0.00', border=_BORDE_THIN)
-    fila += 1
-
-    for p in partidas.get('comisiones_banco', []):
-        ws.row_dimensions[fila].height = 15
-        fecha_val = p['fecha']
-        if isinstance(fecha_val, datetime):
-            fecha_str = fecha_val.strftime('%d/%m/%Y')
-        else:
-            fecha_str = str(fecha_val) if fecha_val else ''
-        _c(ws, fila, 3, fecha_str, size=10, bold=True)
-        _c(ws, fila, 5, p['descripcion'], size=10, wrap=True)
-        _c(ws, fila, 7, p['monto'], size=10, align_h='right', num_fmt='#,##0.00')
-        fila += 1
-
-    # Fila espaciadora
-    ws.row_dimensions[fila].height = 4
-    fila += 1
-
-    # ── (-) ITF EN BANCO ──────────────────────────────────────────────
-    _COLOR_ITF_SEC = 'C00000'   # rojo oscuro
-    ws.row_dimensions[fila].height = 15
-    _c(ws, fila, 2, '(-) ITF en Banco',
-       bold=True, size=10, bg=_COLOR_ITF_SEC, color=_COLOR_WHITE, border=_BORDE_THIN)
-    _merge(ws, fila, 2, fila, 6)
-    _c(ws, fila, 7, None, bg=_COLOR_ITF_SEC, border=_BORDE_THIN)
-    total_itf_banco = sum(p['monto'] for p in partidas.get('itf_banco', []))
-    _c(ws, fila, 8, total_itf_banco if total_itf_banco else 0, bold=True, size=10,
-       align_h='right', bg=_COLOR_ITF_SEC, color=_COLOR_WHITE,
-       num_fmt='#,##0.00', border=_BORDE_THIN)
-    fila += 1
-
-    for p in partidas.get('itf_banco', []):
-        ws.row_dimensions[fila].height = 15
-        fecha_val = p['fecha']
-        if isinstance(fecha_val, datetime):
-            fecha_str = fecha_val.strftime('%d/%m/%Y')
-        else:
-            fecha_str = str(fecha_val) if fecha_val else ''
-        _c(ws, fila, 3, fecha_str, size=10, bold=True)
-        _c(ws, fila, 5, p['descripcion'], size=10, wrap=True)
-        _c(ws, fila, 7, p['monto'], size=10, align_h='right', num_fmt='#,##0.00')
-        fila += 1
-
-    # Fila espaciadora
-    ws.row_dimensions[fila].height = 4
-    fila += 1
-
     # ══════════════════════════════════════════════════════════════════
     # SALDO SEGÚN EXTRACTO BANCARIO
     # ══════════════════════════════════════════════════════════════════
@@ -1584,16 +1554,12 @@ def _escribir_hoja_conciliacion_final(
     #   cargos_lib_no_ext  → positivos  (conta -, invertido) → sumar al saldo libros
     #   abonos_ext_no_lib  → positivos  (banco +)       → sumar al saldo libros
     #   cargos_ext_no_lib  → negativos  (banco -, original)  → sumar (ya negativos, reduce)
-    #   comisiones_banco   → negativos  (DIF COMISON, original) → sumar (ya negativos, reduce)
-    #   itf_banco          → negativos  (DIF COMISON, original) → sumar (ya negativos, reduce)
     saldo_conciliado = round(
         saldo_libros
         - total_ab_lib
         + total_cg_lib
         + total_ab_ext
         + total_cg_ext
-        + total_com_banco
-        + total_itf_banco
         - saldo_extracto,
         2
     )

@@ -35,6 +35,7 @@ def generar_reporte_inicial(
     moneda: str  = "Dolares (USD)",
     saldo_contable_final: float | None = None,
     banco: str = '',
+    cuenta: str = '',
 ) -> Path:
     """
     Genera el Excel de conciliacion inicial y su PDF de resumen.
@@ -78,6 +79,12 @@ def generar_reporte_inicial(
             ws_ini = wb_ini['CONTANET']
             ws_ini.cell(row=1, column=31).value = '__BANCO__'
             ws_ini.cell(row=2, column=31).value = banco
+        # Guardar número de cuenta como metadato
+        if cuenta:
+            wb_ini = writer.book
+            ws_ini = wb_ini['CONTANET']
+            ws_ini.cell(row=1, column=32).value = '__CUENTA__'
+            ws_ini.cell(row=2, column=32).value = cuenta
 
     # ── Aplicar formato visual Excel ──────────────────────────────────
     _aplicar_formato(ruta_salida)
@@ -197,6 +204,37 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
     3. Monto repetido → Ignorar
     4. Suma (1 a N) o (N a 1) → Buscar combinaciones y conciliar si es única
     """
+    # ── Guardia defensiva: asegurar que todas las columnas requeridas existan ──────
+    # Esto protege contra DataFrames de contabilidad o banco vacíos / mal mapeados.
+    _cols_banco_req = {
+        'Fecha': pd.NaT,
+        'Monto-Banco': 0.0,
+        'Banco - Descripción': '',
+        'Banco - # Operación': '',
+        '# Operación2': '',
+        'MAR': '',
+        'Anotación': '',
+        '_pendiente': False,
+    }
+    _cols_conta_req = {
+        'Fecha': pd.NaT,
+        'Monto-Conta': 0.0,
+        'Conta - # Operación': '',
+        'Conta - Glosa': '',
+        '# Operación2': '',
+        'MAR': '',
+        'Anotación': '',
+        '_pendiente': False,
+        '_suggested': False,
+    }
+    for col, default in _cols_banco_req.items():
+        if col not in banco_ext.columns:
+            banco_ext[col] = default
+    for col, default in _cols_conta_req.items():
+        if col not in conta_ext.columns:
+            conta_ext[col] = default
+    # ─────────────────────────────────────────────────────────────────────────────
+
     banco_ext['_matched'] = False
     conta_ext['_matched'] = False
     diferencias_set = _diferencias_comision(moneda)
@@ -415,6 +453,13 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
     # 1.65 Conciliación por descarte cuando quedan exactamente 1 banco y 1 conta no conciliados
     # con mismo monto y misma fecha (fecha exacta). Cubre el caso donde todos los demás ya
     # fueron emparejados por reglas anteriores y solo queda 1 de cada lado.
+
+    # Guardia defensiva: asegurar que la columna 'Fecha' exista en ambos DataFrames
+    if 'Fecha' not in banco_ext.columns:
+        banco_ext['Fecha'] = pd.NaT
+    if 'Fecha' not in conta_ext.columns:
+        conta_ext['Fecha'] = pd.NaT
+
     fechas_presentes = set(
         banco_ext.loc[~banco_ext['_matched'], 'Fecha'].dropna().unique()
     ).union(
