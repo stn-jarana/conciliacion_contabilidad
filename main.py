@@ -248,22 +248,181 @@ def seleccionar_banco() -> dict | None:
         print("  X Opcion invalida, intente de nuevo.\n")
 
 
-def seleccionar_empresa() -> dict:
-    """Muestra el menú de empresas, monedas y bancos; devuelve la configuración elegida."""
+def extraer_datos_conciliacion_inicial(ruta_archivo: Path | str) -> dict:
+    """
+    Extrae empresa, banco, moneda, mes y año a partir del nombre del archivo
+    de conciliación inicial (ej: CBI_STN_Scotia_Dolares_JUNIO_2026_20260918.xlsx).
+    También lee metadatos de la hoja CONTANET si están disponibles como respaldo.
+    """
+    path = Path(ruta_archivo)
+    nombre = path.stem.strip()
+
+    # 1. Mes y Año
+    MESES = {
+        'ENERO': 'ENERO', 'FEBRERO': 'FEBRERO', 'MARZO': 'MARZO', 'ABRIL': 'ABRIL',
+        'MAYO': 'MAYO', 'JUNIO': 'JUNIO', 'JULIO': 'JULIO', 'AGOSTO': 'AGOSTO',
+        'SETIEMBRE': 'SETIEMBRE', 'SEPTIEMBRE': 'SETIEMBRE', 'OCTUBRE': 'OCTUBRE',
+        'NOVIEMBRE': 'NOVIEMBRE', 'DICIEMBRE': 'DICIEMBRE'
+    }
+    patron_meses = '|'.join(MESES.keys())
+    m_mes_anio = _re_main.search(rf'(?:^|_)(?:MES_)?({patron_meses})_(\d{{4}})(?:_|$)', nombre, flags=_re_main.IGNORECASE)
+    if m_mes_anio:
+        mes_str = MESES[m_mes_anio.group(1).upper()]
+        anio_str = m_mes_anio.group(2)
+        mes_anio = f"{mes_str}_{anio_str}"
+    else:
+        mes_anio = _mes_anio_desde_inicial(path)
+
+    # 2. Moneda
+    if _re_main.search(r'(?:^|_)(?:DOLARES|USD|DOL)(?:_|$)', nombre, flags=_re_main.IGNORECASE):
+        moneda = "Dolares (USD)"
+        mon_tipo = "Dolares"
+    elif _re_main.search(r'(?:^|_)(?:SOLES|PEN|SOL)(?:_|$)', nombre, flags=_re_main.IGNORECASE):
+        moneda = "Soles (PEN)"
+        mon_tipo = "Soles"
+    else:
+        if any(x in nombre.upper() for x in ('DOL', 'USD')):
+            moneda = "Dolares (USD)"
+            mon_tipo = "Dolares"
+        else:
+            moneda = "Soles (PEN)"
+            mon_tipo = "Soles"
+
+    # 3. Banco
+    banco_nombre = ''
+    banco_id = ''
+    if _re_main.search(r'(?:^|_)(?:SCOTIABANK|SCOTIA)(?:_|$)', nombre, flags=_re_main.IGNORECASE):
+        banco_nombre = 'Scotia'
+        banco_id = 'SCOTIABANK'
+    elif _re_main.search(r'(?:^|_)(?:BN|NACION|BANCO_DE_LA_NACION)(?:_|$)', nombre, flags=_re_main.IGNORECASE):
+        banco_nombre = 'BN'
+        banco_id = 'BN'
+    elif _re_main.search(r'(?:^|_)(?:BCP|CREDITO)(?:_|$)', nombre, flags=_re_main.IGNORECASE):
+        banco_nombre = 'BCP'
+        banco_id = 'BCP'
+    elif _re_main.search(r'(?:^|_)(?:BBVA|CONTINENTAL)(?:_|$)', nombre, flags=_re_main.IGNORECASE):
+        banco_nombre = 'BBVA'
+        banco_id = 'BBVA'
+    elif _re_main.search(r'(?:^|_)(?:INTERBANK|IBK)(?:_|$)', nombre, flags=_re_main.IGNORECASE):
+        banco_nombre = 'INTERBANK'
+        banco_id = 'INTERBANK'
+    elif _re_main.search(r'(?:^|_)(?:BANBIF)(?:_|$)', nombre, flags=_re_main.IGNORECASE):
+        banco_nombre = 'BANBIF'
+        banco_id = 'BANBIF'
+    elif _re_main.search(r'(?:^|_)(?:PICHINCHA)(?:_|$)', nombre, flags=_re_main.IGNORECASE):
+        banco_nombre = 'PICHINCHA'
+        banco_id = 'PICHINCHA'
+
+    # Metadatos del archivo Excel (si existe y tiene CONTANET)
+    banco_leido = ''
+    cuenta_leida = ''
+    if path.exists() and path.suffix.lower() in ('.xlsx', '.xls'):
+        try:
+            import openpyxl as _opxl
+            wb_meta = _opxl.load_workbook(path, read_only=True, data_only=True)
+            if 'CONTANET' in wb_meta.sheetnames:
+                ws_meta = wb_meta['CONTANET']
+                headers_meta = {
+                    str(ws_meta.cell(row=1, column=c).value).strip(): c
+                    for c in range(1, 40)
+                }
+                if '__BANCO__' in headers_meta:
+                    val = ws_meta.cell(row=2, column=headers_meta['__BANCO__']).value
+                    if val:
+                        banco_leido = str(val).strip()
+                if '__CUENTA__' in headers_meta:
+                    val = ws_meta.cell(row=2, column=headers_meta['__CUENTA__']).value
+                    if val:
+                        cuenta_leida = str(val).strip()
+            wb_meta.close()
+        except Exception:
+            pass
+
+    if not banco_nombre:
+        if banco_leido:
+            banco_nombre = banco_leido
+        else:
+            banco_nombre = 'BANCO'
+    if not banco_id:
+        try:
+            from bancos import clave_banco
+            banco_id = clave_banco(banco_nombre) if banco_nombre else 'BCP'
+        except Exception:
+            banco_id = 'BCP'
+
+    # 4. Empresa
+    empresa_token = ''
+    patron_std = _re_main.match(
+        rf'^(?:CBI|CBF)_(.+?)_(?:Scotia|Scotiabank|BCP|BN|Nacion|BBVA|Interbank|Banbif|Pichincha|Banco)_(?:Dolares|Soles|USD|PEN|DOL|SOL)_(?:{patron_meses})_(\d{{4}})',
+        nombre,
+        flags=_re_main.IGNORECASE
+    )
+    if patron_std:
+        empresa_token = patron_std.group(1).strip()
+    else:
+        partes = nombre.split('_')
+        if len(partes) >= 2 and partes[0].upper() in ('CBI', 'CBF'):
+            empresa_token = partes[1]
+
+    empresa_detectada = ''
+    empresa_cfg = None
+
+    for emp in EMPRESAS:
+        nombre_limpio = _limpiar_nombre(emp['nombre']).upper()
+        if empresa_token:
+            token_upper = _limpiar_nombre(empresa_token).upper()
+            if token_upper == nombre_limpio or token_upper in nombre_limpio or nombre_limpio in token_upper:
+                empresa_cfg = emp
+                empresa_detectada = emp['nombre']
+                break
+        if nombre_limpio in nombre.upper():
+            empresa_cfg = emp
+            empresa_detectada = emp['nombre']
+            break
+
+    if not empresa_detectada:
+        empresa_detectada = empresa_token if empresa_token else 'Empresa'
+
+    # 5. RUC y Cuenta
+    ruc = ''
+    cuentas = {}
+    if empresa_cfg:
+        ruc = empresa_cfg.get('ruc', '')
+        mon_cfg = next(
+            (m for m in empresa_cfg.get('monedas', []) if mon_tipo.upper() in m['nombre'].upper()),
+            empresa_cfg.get('monedas', [{}])[0] if empresa_cfg.get('monedas') else {}
+        )
+        cuentas = mon_cfg.get('cuentas', {})
+
+    cuenta = cuenta_leida or cuentas.get(banco_id, cuentas.get(banco_nombre, ''))
+
+    return {
+        'empresa': empresa_detectada,
+        'ruc': ruc,
+        'banco_nombre': banco_nombre,
+        'banco_id': banco_id,
+        'moneda': moneda,
+        'mes_anio': mes_anio,
+        'cuenta': cuenta,
+        'cuentas': cuentas,
+    }
+
+
+def seleccionar_empresa() -> dict | None:
+    """Muestra el menú de empresas, monedas y bancos; devuelve la configuración elegida o None si cancela."""
     while True:
-        print("=" * 60)
-        print("  CONCILIACION BANCARIA")
-        print("=" * 60)
+        print("-" * 60)
+        print("  CONCILIACION INICIAL - SELECCION DE EMPRESA")
+        print("-" * 60)
         print("\nSeleccione la empresa:\n")
         for i, emp in enumerate(EMPRESAS, 1):
             print(f"  {i}. {emp['nombre']}")
-        print("  0. Salir")
+        print("  0. Volver")
         print()
         opcion = input("Opcion: ").strip()
 
         if opcion == "0":
-            print("\n  Hasta luego.\n")
-            raise SystemExit(0)
+            return None
 
         if not opcion.isdigit() or not (1 <= int(opcion) <= len(EMPRESAS)):
             print("  X Opcion invalida, intente de nuevo.\n")
@@ -309,15 +468,17 @@ def seleccionar_empresa() -> dict:
 
 
 def seleccionar_accion() -> str:
-    """Pregunta qué desea hacer: reporte inicial o reporte final."""
+    """Pregunta qué desea hacer: conciliación inicial o conciliación final."""
     while True:
-        print("-" * 60)
+        print("=" * 60)
+        print("  CONCILIACION BANCARIA")
+        print("=" * 60)
         print("  Que desea hacer?\n")
         print("  1. Generar reporte inicial")
-        print("     (carga archivos banco + contabilidad y genera el Excel de trabajo)")
+        print("     (selecciona empresa, moneda y banco para generar el Excel de trabajo)")
         print()
         print("  2. Generar reporte final")
-        print("     (carga el Excel ya trabajado por el especialista)")
+        print("     (carga el Excel inicial trabajado; detecta empresa, banco, moneda y mes)")
         print()
         print("  0. Salir")
         print()
@@ -702,75 +863,72 @@ def flujo_reporte_inicial(config: dict) -> None:
 # FLUJO — REPORTE FINAL
 # ══════════════════════════════════════════════════════════
 
-def flujo_reporte_final(config: dict) -> None:
+def flujo_reporte_final(config: dict | None = None) -> None:
     """Carga el Excel trabajado por el especialista y genera el reporte final."""
     from reporte_final import generar_reporte_final
 
     print("-" * 60)
+    print("  CONCILIACION FINAL")
+    print("-" * 60)
     print("Cargue el Excel de conciliacion ya trabajado por el especialista.")
     print("(Es el archivo 'CBI_...' con la hoja Anexar1 completada)\n")
 
-    file_inicial = pedir_archivo("Ruta del Excel trabajado (.xlsx): ")
+    file_inicial = pedir_archivo("Ruta del Excel inicial trabajado (.xlsx): ")
     print()
 
-    # Extraer banco y mes/año desde config o desde el archivo inicial para construir el nombre CBF
-    banco_nombre = config.get('banco') or 'BANCO'
+    datos = extraer_datos_conciliacion_inicial(file_inicial)
+
+    if config:
+        empresa = config.get('empresa') or datos['empresa']
+        ruc = config.get('ruc') or datos['ruc']
+        moneda = config.get('nombre') or datos['moneda']
+        banco_nombre = datos['banco_nombre'] if datos['banco_nombre'] not in ('', 'BANCO') else (config.get('banco') or 'BANCO')
+        banco_id = datos.get('banco_id') or config.get('banco', '').upper() or 'BCP'
+        cuentas = config.get('cuentas') or datos.get('cuentas', {})
+    else:
+        empresa = datos['empresa']
+        ruc = datos['ruc']
+        moneda = datos['moneda']
+        banco_nombre = datos['banco_nombre']
+        banco_id = datos['banco_id']
+        cuentas = datos.get('cuentas', {})
+
     try:
         from bancos import nombre_corto_banco
         if banco_nombre in ('SCOTIABANK', 'BCP', 'BN'):
             banco_nombre = nombre_corto_banco(banco_nombre)
     except Exception:
         pass
-    # Intentar leer banco desde la hoja CONTANET (metadato guardado en el reporte inicial)
-    try:
-        import openpyxl as _opxl
-        _wb_tmp = _opxl.load_workbook(file_inicial, read_only=True, data_only=True)
-        if 'CONTANET' in _wb_tmp.sheetnames:
-            _ws_tmp = _wb_tmp['CONTANET']
-            # La columna de banco está en la cabecera del archivo conta original,
-            # pero aquí usamos el metadato de banco guardado si existe
-            for col_idx in range(1, 40):
-                etiq = _ws_tmp.cell(row=1, column=col_idx).value
-                if str(etiq).strip() == '__BANCO__':
-                    val = _ws_tmp.cell(row=2, column=col_idx).value
-                    if val:
-                        banco_nombre = str(val).strip()
-                    break
-        _wb_tmp.close()
-    except Exception:
-        pass
 
-    if banco_nombre in ('', 'BANCO'):
-        nombre_arch = file_inicial.name.upper()
-        if 'BCP' in nombre_arch or 'CREDITO' in nombre_arch:
-            banco_nombre = 'BCP'
-        elif 'SCOTIA' in nombre_arch:
-            banco_nombre = 'Scotia'
-        elif 'BN' in nombre_arch or 'NACION' in nombre_arch:
-            banco_nombre = 'BN'
+    mes_anio = datos['mes_anio']
+    cuenta_final = datos.get('cuenta') or cuentas.get(banco_id, '')
 
-    mes_anio = _mes_anio_desde_inicial(file_inicial)
+    print("  >> Datos detectados del archivo inicial:")
+    print(f"     - Empresa : {empresa}")
+    print(f"     - Banco   : {banco_nombre}")
+    print(f"     - Moneda  : {moneda}")
+    print(f"     - Periodo : {mes_anio}")
+    if cuenta_final:
+        print(f"     - Cuenta  : {cuenta_final}")
+    print()
+
     ruta_salida = _construir_nombre_archivo(
         'CBF',
-        empresa=config.get('empresa', 'Empresa'),
+        empresa=empresa,
         banco=banco_nombre,
-        moneda=config.get('nombre', ''),
+        moneda=moneda,
         mes_anio=mes_anio,
     )
-
-    # Obtener número de cuenta desde el config (fallback si el CBI no tiene __CUENTA__)
-    banco_id = config.get('banco', '').upper()  # ej. 'SCOTIABANK', 'BCP', 'BN'
-    cuenta_config = config.get('cuentas', {}).get(banco_id, '')
 
     try:
         generar_reporte_final(
             file_inicial,
             ruta_salida=ruta_salida,
-            empresa=config.get('empresa', ''),
-            ruc=config.get('ruc', ''),
-            moneda=config.get('nombre', ''),
+            empresa=empresa,
+            ruc=ruc,
+            moneda=moneda,
             banco=banco_nombre,
-            cuenta=cuenta_config,
+            cuenta=cuenta_final,
         )
     except ValueError as e:
         print(f"\n  X Error: {e}\n")
@@ -782,10 +940,14 @@ def flujo_reporte_final(config: dict) -> None:
 
 
 if __name__ == '__main__':
-    config = seleccionar_empresa()
-    accion = seleccionar_accion()
+    while True:
+        accion = seleccionar_accion()
 
-    if accion == "1":
-        flujo_reporte_inicial(config)
-    elif accion == "2":
-        flujo_reporte_final(config)
+        if accion == "1":
+            config = seleccionar_empresa()
+            if config is not None:
+                flujo_reporte_inicial(config)
+                break
+        elif accion == "2":
+            flujo_reporte_final()
+            break

@@ -7,6 +7,7 @@ y evita que los registros de Contanet de bancos distintos se crucen entre sí.
 
 from __future__ import annotations
 
+import datetime
 from pathlib import Path
 import re
 import unicodedata
@@ -37,6 +38,43 @@ def normalizar_texto(valor: object) -> str:
     texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
     texto = texto.upper().replace("N°", " NUMERO ").replace("Nº", " NUMERO ").replace("#", " NUMERO ")
     return re.sub(r"\s+", " ", re.sub(r"[^A-Z0-9]+", " ", texto)).strip()
+
+
+def construir_nro_op_bn(descripcion: object, fecha: object) -> str:
+    """Construye el número de operación para Banco de la Nación.
+
+    Se compone del texto de la columna Banco - Descripción (sin espacios ni
+    caracteres especiales) y la fecha de la operación en formato DDMMYYYY.
+    Por ejemplo: 'VA 1721' y '26/06/2026' -> 'VA172126062026'.
+    """
+    desc = "" if descripcion is None or pd.isna(descripcion) else str(descripcion).strip()
+    if desc.lower() in ("nan", "none", "0"):
+        desc = ""
+    desc_limpio = "".join(c for c in normalizar_texto(desc) if c.isalnum()) if desc else ""
+
+    fecha_str = ""
+    if fecha is not None and not pd.isna(fecha):
+        if isinstance(fecha, (datetime.date, datetime.datetime, pd.Timestamp)):
+            fecha_str = fecha.strftime("%d%m%Y")
+        else:
+            try:
+                dt = pd.to_datetime(fecha, dayfirst=True, errors="coerce")
+                if pd.notna(dt):
+                    fecha_str = dt.strftime("%d%m%Y")
+                else:
+                    digits = re.sub(r"\D", "", str(fecha))
+                    if len(digits) == 8:
+                        fecha_str = digits
+            except Exception:
+                digits = re.sub(r"\D", "", str(fecha))
+                if len(digits) == 8:
+                    fecha_str = digits
+
+    if desc_limpio and fecha_str:
+        if desc_limpio.endswith(fecha_str):
+            return desc_limpio
+        return f"{desc_limpio}{fecha_str}"
+    return desc_limpio or fecha_str
 
 
 def clave_banco(banco: str) -> str:
@@ -294,31 +332,21 @@ def leer_estado_bancario(
     else:
         monto = _a_numero(datos[col_monto])
 
-    # En el formato BN Excel, el nro_operacion compuesto se arma como:
-    #   Trans. - Documento - Fecha_sin_separadores
-    # Ejemplo: "CHEQUE - 17615586 - 28082026"
-    # Esto aplica tanto al formato DIA/CODIFICACION/CARGOS/ABONOS/SALDOS
-    # como al formato Fecha/Trans./Documento/Cargo/Abono del BN.
+    # En el formato BN Excel, el nro_operacion se compone de la columna Banco - Descripción
+    # y la fecha de la operación (DDMMYYYY). Ejemplo: 'VA 1721' y '26/06/2026' -> 'VA172126062026'.
     _clave = clave_banco(banco)
-    # Activar el nro_operacion compuesto para cualquier archivo XLS del Banco de la Nación,
-    # independientemente de si se encontró col_operacion. Esto produce identificadores más
-    # descriptivos: "CHEQUE - 17615586 - 28082026"
     _es_formato_bn_xls = _clave == "BN" and col_descripcion is not None and col_fecha is not None
 
     if _es_formato_bn_xls and col_descripcion and col_fecha:
-        def _construir_nro_op_bn(row) -> str:
+        def _obtener_op_bn(row) -> str:
             desc = str(row[col_descripcion] or "").strip()
-            fecha_val = str(row[col_fecha] or "").strip()
-            # Quitar separadores de la fecha (01/08/2026 o 2026.08.31 → 01082026)
-            fecha_limpia = fecha_val.replace("/", "").replace("-", "").replace(".", "").strip()
-            # Incluir número de documento si existe
             doc = ""
             if col_operacion:
                 doc = str(row[col_operacion] or "").strip()
                 doc = doc.replace(".0", "").strip() if doc.endswith(".0") else doc
-            partes = [p for p in [desc, doc, fecha_limpia] if p and p not in ("0", "nan")]
-            return " - ".join(partes) if partes else ""
-        nro_op_serie = datos.apply(_construir_nro_op_bn, axis=1)
+            desc_completo = f"{desc} {doc}".strip() if doc and doc not in desc else desc
+            return construir_nro_op_bn(desc_completo, row[col_fecha])
+        nro_op_serie = datos.apply(_obtener_op_bn, axis=1)
     else:
         nro_op_serie = _a_texto(datos[col_operacion]) if col_operacion else pd.Series("", index=datos.index)
 

@@ -1000,8 +1000,27 @@ def guardar_conciliados(
             hojas_dict[h_s] = pd.DataFrame(columns=COLS_CONCILIADOS)
             hojas_dict[h_d] = pd.DataFrame(columns=COLS_CONCILIADOS)
 
-    # Actualizar la hoja activa con los datos
-    hojas_dict[hoja_activa] = tabla
+    # Acumular en la hoja activa: agregar la nueva data a la ya existente
+    # (no reemplazar), para preservar registros de conciliaciones anteriores.
+    if hoja_activa in hojas_dict and not hojas_dict[hoja_activa].empty:
+        df_existente = hojas_dict[hoja_activa].copy()
+        # Asegurar que las columnas coincidan
+        for col in COLS_CONCILIADOS:
+            if col not in df_existente.columns:
+                df_existente[col] = ''
+        df_existente = df_existente[COLS_CONCILIADOS]
+        if not tabla.empty:
+            df_acumulado = pd.concat([df_existente, tabla], ignore_index=True)
+            # Eliminar duplicados exactos por Asiento Contable + Número de Operación
+            df_acumulado = df_acumulado.drop_duplicates(
+                subset=['Asiento Contable', 'Número de Operación'],
+                keep='last',
+            ).reset_index(drop=True)
+        else:
+            df_acumulado = df_existente
+        hojas_dict[hoja_activa] = df_acumulado
+    else:
+        hojas_dict[hoja_activa] = tabla
     # Asegurar que la otra hoja de la empresa exista
     if hoja_otra not in hojas_dict:
         hojas_dict[hoja_otra] = pd.DataFrame(columns=COLS_CONCILIADOS)
@@ -1015,9 +1034,11 @@ def guardar_conciliados(
         # Aplicar formato visual
         _aplicar_formato_conciliados_contanet(ruta_archivo, [hoja_activa, hoja_otra])
 
-        n = len(tabla)
+        n_nuevos = len(tabla)
+        n_total  = len(hojas_dict.get(hoja_activa, tabla))
         print(f"\n  [OK] Conciliados para Contanet guardados en: {ruta_archivo}")
-        print(f"       Empresa: {empresa} | Hoja: {hoja_activa} | {n} movimiento(s)")
+        print(f"       Empresa: {empresa} | Hoja: {hoja_activa} | "
+              f"+{n_nuevos} nuevo(s) agregado(s), {n_total} total en hoja")
         return True
 
     except PermissionError:

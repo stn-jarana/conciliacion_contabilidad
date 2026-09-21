@@ -24,6 +24,13 @@ from pathlib import Path
 import pandas as pd
 import pymupdf
 
+try:
+    from bancos import construir_nro_op_bn
+except ImportError:
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from bancos import construir_nro_op_bn
+
 
 # =====================================================================
 # CATALOGO DE EMPRESAS (RUC / DOI → nombre corto)
@@ -293,9 +300,9 @@ def _extraer_datos_directos_pymupdf(ruta_pdf: Path) -> dict | None:
             else:
                 saldo_fila = saldo_actual
 
-            # Extraer número de operación si aplica
-            m_op = re.search(r'\d+', cod)
-            nro_op = m_op.group(0) if m_op else cod
+            # Número de operación compuesto: Descripción + Fecha (DDMMYYYY)
+            # Ej: VA 1721 y 26/06/2026 -> VA172126062026
+            nro_op = construir_nro_op_bn(cod, fecha_dt)
 
             movimientos.append({
                 "fecha": fecha_dt,
@@ -377,8 +384,9 @@ def _extraer_datos_texto_fallback(ruta_pdf: Path) -> dict:
         saldos = _parse_monto(cols[3]) if len(cols) > 3 else 0.0
 
         monto_neto = round(abonos - cargos, 2)
-        m_op = re.search(r'\d+', cod)
-        nro_op = m_op.group(0) if m_op else cod
+        # Número de operación compuesto: Descripción + Fecha (DDMMYYYY)
+        # Ej: VA 1721 y 26/06/2026 -> VA172126062026
+        nro_op = construir_nro_op_bn(cod, fecha_encontrada)
 
         movimientos.append({
             "fecha": fecha_encontrada,

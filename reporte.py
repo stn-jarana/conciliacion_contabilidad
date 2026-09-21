@@ -14,7 +14,7 @@ Uso:
     generar_reporte_inicial(bank, conta, ruta_salida)
 """
 
-# import re
+import re
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
@@ -56,7 +56,7 @@ def generar_reporte_inicial(
     tab_conta = _preparar_tab_contanet(conta)
 
     # ── Preparar Anexar1 (union vertical) ─────────────────────────────
-    anexar1 = _preparar_anexar1(tab_banco, tab_conta, moneda=moneda)
+    anexar1 = _preparar_anexar1(tab_banco, tab_conta, moneda=moneda, banco=banco)
 
     # ── Preparar Resumen ──────────────────────────────────────────────
     resumen = _preparar_resumen(anexar1)
@@ -196,7 +196,7 @@ def _diferencias_comision(moneda: str) -> set[float]:
     return {1.53, 82.00, 94.00, 69.00, 29.00}
 
 
-def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, moneda: str = "Dolares (USD)"):
+def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, moneda: str = "Dolares (USD)", banco: str = ""):
     """
     Algoritmo de conciliación automática con las reglas:
     1. Código igual → Conciliar automáticamente
@@ -219,7 +219,9 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
     _cols_conta_req = {
         'Fecha': pd.NaT,
         'Monto-Conta': 0.0,
+        'Conta - # Registro': '',
         'Conta - # Operación': '',
+        'Conta - Giro': '',
         'Conta - Glosa': '',
         '# Operación2': '',
         'MAR': '',
@@ -227,6 +229,22 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
         '_pendiente': False,
         '_suggested': False,
     }
+    # Mapear nombres alternativos de banco si vienen directamente de hoja BANCO
+    if 'Descripción operación' in banco_ext.columns and 'Banco - Descripción' not in banco_ext.columns:
+        banco_ext['Banco - Descripción'] = banco_ext['Descripción operación']
+    if 'Descripcion operacion' in banco_ext.columns and 'Banco - Descripción' not in banco_ext.columns:
+        banco_ext['Banco - Descripción'] = banco_ext['Descripcion operacion']
+    if '# Operación' in banco_ext.columns and 'Banco - # Operación' not in banco_ext.columns:
+        banco_ext['Banco - # Operación'] = banco_ext['# Operación']
+
+    # Mapear nombres alternativos de contabilidad si vienen directamente de CONTANET
+    if '# Registro' in conta_ext.columns and 'Conta - # Registro' not in conta_ext.columns:
+        conta_ext['Conta - # Registro'] = conta_ext['# Registro']
+    if 'Giro' in conta_ext.columns and 'Conta - Giro' not in conta_ext.columns:
+        conta_ext['Conta - Giro'] = conta_ext['Giro']
+    if 'Glosa' in conta_ext.columns and 'Conta - Glosa' not in conta_ext.columns:
+        conta_ext['Conta - Glosa'] = conta_ext['Glosa']
+
     for col, default in _cols_banco_req.items():
         if col not in banco_ext.columns:
             banco_ext[col] = default
@@ -575,6 +593,9 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
         used_c = set()
         for b_idx, b_amt in pool_b:
             avail_c = [x for x in pool_c if x[0] not in used_c]
+            # Guard anti-explosión combinatoria: si hay demasiados candidatos, omitir
+            if len(avail_c) > 25:
+                continue
             valid_combos = []
             for r in range(2, min(5, len(avail_c) + 1)):
                 for combo in combinations(avail_c, r):
@@ -614,6 +635,9 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
         used_b = set()
         for c_idx, c_amt in pool_c2:
             avail_b = [x for x in pool_b2 if x[0] not in used_b]
+            # Guard anti-explosión combinatoria: si hay demasiados candidatos, omitir
+            if len(avail_b) > 25:
+                continue
             valid_combos = []
             for r in range(2, min(5, len(avail_b) + 1)):
                 for combo in combinations(avail_b, r):
@@ -642,6 +666,243 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
                 for b_idx in combo_idxs:
                     banco_ext.at[b_idx, '# Operación2'] = op_link
                     banco_ext.at[b_idx, 'Anotación'] = anot
+
+    # 4.3b Segundo pase de sumas sin restricción de fecha (Opción A)
+    # Cubre casos donde N movimientos del banco de distintas fechas suman exactamente
+    # 1 registro de contabilidad (o viceversa). Solo se acepta diferencia == 0.0 para
+    # evitar falsos positivos al relajar la restricción de fecha.
+    # Se ejecuta DESPUÉS del pase por fecha exacta, usando solo los aún no conciliados/sugeridos.
+    _pool_b_global = [
+        (idx, float(r.get('Monto-Banco', 0) or 0))
+        for idx, r in banco_ext[~banco_ext['_matched']].iterrows()
+        if not str(banco_ext.at[idx, 'Anotación']).startswith('Sugerido')
+    ]
+    _pool_c_global = [
+        (idx, float(r.get('Monto-Conta', 0) or 0))
+        for idx, r in conta_ext[~conta_ext['_matched']].iterrows()
+        if not r.get('_suggested', False)
+        and not str(conta_ext.at[idx, 'Anotación']).startswith('Sugerido')
+    ]
+
+    _used_c_global = set()
+    # 1 Banco = N Conta (fechas distintas, monto exacto)
+    for b_idx, b_amt in _pool_b_global:
+        if b_amt == 0:
+            continue
+        avail_c = [x for x in _pool_c_global if x[0] not in _used_c_global]
+        # Guard anti-explosión combinatoria
+        if len(avail_c) > 25:
+            continue
+        valid_combos = []
+        for _r in range(2, min(7, len(avail_c) + 1)):
+            for combo in combinations(avail_c, _r):
+                suma_conta = sum(x[1] for x in combo)
+                diff = round(abs(abs(b_amt) - abs(suma_conta)), 2)
+                if diff == 0.0:
+                    valid_combos.append((combo, diff))
+        if len(valid_combos) == 1:
+            combo_idxs = [x[0] for x in valid_combos[0][0]]
+            _used_c_global.update(combo_idxs)
+            op_link = f"SUG-SUM-B{b_idx}"
+            anot = 'Sugerido: 1 Banco = N Conta (fechas distintas)'
+            banco_ext.at[b_idx, '# Operación2'] = op_link
+            banco_ext.at[b_idx, 'Anotación'] = anot
+            for c_idx in combo_idxs:
+                conta_ext.at[c_idx, '# Operación2'] = op_link
+                conta_ext.at[c_idx, 'Anotación'] = anot
+                conta_ext.at[c_idx, '_suggested'] = True
+
+    _used_b_global = set()
+    # N Banco = 1 Conta (fechas distintas, monto exacto)
+    for c_idx, c_amt in _pool_c_global:
+        if c_amt == 0 or c_idx in _used_c_global:
+            continue
+        avail_b = [x for x in _pool_b_global if x[0] not in _used_b_global]
+        # Guard anti-explosión combinatoria
+        if len(avail_b) > 25:
+            continue
+        valid_combos = []
+        for _r in range(2, min(7, len(avail_b) + 1)):
+            for combo in combinations(avail_b, _r):
+                suma_banco = sum(x[1] for x in combo)
+                diff = round(abs(abs(suma_banco) - abs(c_amt)), 2)
+                if diff == 0.0:
+                    valid_combos.append((combo, diff))
+        if len(valid_combos) == 1:
+            combo_idxs = [x[0] for x in valid_combos[0][0]]
+            _used_b_global.update(combo_idxs)
+            op_link = f"SUG-SUM-C{c_idx}"
+            anot = 'Sugerido: N Banco = 1 Conta (fechas distintas)'
+            conta_ext.at[c_idx, '# Operación2'] = op_link
+            conta_ext.at[c_idx, '_suggested'] = True
+            conta_ext.at[c_idx, 'Anotación'] = anot
+            for b_idx in combo_idxs:
+                banco_ext.at[b_idx, '# Operación2'] = op_link
+                banco_ext.at[b_idx, 'Anotación'] = anot
+
+    # 4.35 Regla Scotiabank: TBK-PAGO PLANILLAS en Banco emparejado con PAGO DE HABERES en Conta (si el monto coincide)
+    mask_tbk_plan = (
+        (~banco_ext['_matched']) &
+        (banco_ext['Banco - Descripción'].astype(str).str.contains(r'TBK-PAGO\s+PLANILLAS', case=False, na=False))
+    )
+    for b_idx in banco_ext[mask_tbk_plan].index:
+        m_b = float(banco_ext.at[b_idx, 'Monto-Banco'] or 0)
+        if m_b == 0:
+            continue
+        # Buscar en contabilidad registros con 'PAGO DE HABERES' o relacionado a haberes/planillas en Giro o Glosa
+        cands_c = conta_ext[
+            (~conta_ext['_matched']) &
+            (abs(conta_ext['Monto-Conta'].fillna(0) - m_b) <= 0.01) &
+            (
+                conta_ext['Conta - Giro'].astype(str).str.contains(r'PAGO\s+DE\s+HABERES|HABERES|PLANILLA', case=False, na=False) |
+                conta_ext['Conta - Glosa'].astype(str).str.contains(r'PAGO\s+DE\s+HABERES|HABERES|PLANILLA', case=False, na=False)
+            )
+        ]
+        if not cands_c.empty:
+            # Si hay coincidencia por fecha, preferirla; si no, la primera coincidencia de monto
+            cands_fecha = cands_c[cands_c['Fecha'] == banco_ext.at[b_idx, 'Fecha']]
+            c_idx = cands_fecha.index[0] if not cands_fecha.empty else cands_c.index[0]
+
+            op_b = _normalizar_nro_op(banco_ext.at[b_idx, 'Banco - # Operación'])
+            op_c = _normalizar_nro_op(conta_ext.at[c_idx, 'Conta - # Operación'])
+            op_link = op_b or op_c or f"AUTO-TBK-PLAN-{b_idx}"
+
+            banco_ext.at[b_idx, '_matched'] = True
+            conta_ext.at[c_idx, '_matched'] = True
+            banco_ext.at[b_idx, 'MAR'] = 'X'
+            conta_ext.at[c_idx, 'MAR'] = 'X'
+            banco_ext.at[b_idx, '# Operación2'] = op_link
+            conta_ext.at[c_idx, '# Operación2'] = op_link
+            banco_ext.at[b_idx, 'Anotación'] = 'Auto: TBK-PAGO PLANILLAS a Haberes'
+            conta_ext.at[c_idx, 'Anotación'] = 'Auto: TBK-PAGO PLANILLAS a Haberes'
+
+    # 4.38 Agrupación N Banco = 1 Conta por # Operación (Lotes / Detracciones BN / Monto Exacto)
+    # Cubre casos donde un grupo de movimientos en Banco comparten el mismo # Operación (o lote)
+    # y su suma total coincide exactamente con un movimiento o asiento de Contabilidad.
+    # Diseñado para lotes masivos (ej. cientos de detracciones de Banco de la Nación 'VA 1721')
+    # y transferencias en bloque de cualquier banco con monto exacto, sin sufrir explosión combinatoria.
+    es_banco_nacion = (
+        bool(re.search(r'(?i)\b(BN|NACION|BANCO\s+DE\s+LA\s+NACION)\b', str(banco))) or
+        banco_ext['Banco - Descripción'].astype(str).str.contains(r'(?i)\bVA\s+\d+\b', regex=True).any()
+    )
+
+    unm_b_mask = (
+        (~banco_ext['_matched']) &
+        (~banco_ext['Anotación'].astype(str).str.startswith('Sugerido'))
+    )
+
+    grupos_b_op = {}
+    for b_idx in banco_ext[unm_b_mask].index:
+        op_val = _normalizar_nro_op(banco_ext.at[b_idx, 'Banco - # Operación'])
+        if not op_val or op_val in ('0', 'nan'):
+            desc_b = str(banco_ext.at[b_idx, 'Banco - Descripción'] or '')
+            m_va = re.search(r'(?i)\bVA\s+(\d+)\b', desc_b)
+            if m_va:
+                op_val = m_va.group(1)
+        if op_val and op_val not in ('0', 'nan'):
+            grupos_b_op.setdefault(op_val, []).append(b_idx)
+
+    for op_b, b_idxs in list(grupos_b_op.items()):
+        if len(b_idxs) < 2:
+            continue
+
+        b_idxs_validos = [
+            i for i in b_idxs
+            if not banco_ext.at[i, '_matched'] and not str(banco_ext.at[i, 'Anotación']).startswith('Sugerido')
+        ]
+        if len(b_idxs_validos) < 2:
+            continue
+
+        suma_b = round(sum(float(banco_ext.at[i, 'Monto-Banco'] or 0) for i in b_idxs_validos), 2)
+        if suma_b == 0:
+            continue
+
+        fechas_b = [banco_ext.at[i, 'Fecha'] for i in b_idxs_validos if pd.notna(banco_ext.at[i, 'Fecha'])]
+
+        cands_c = []
+        for c_idx, row_c in conta_ext.iterrows():
+            if row_c['_matched'] or row_c.get('_suggested', False) or str(row_c.get('Anotación', '')).startswith('Sugerido'):
+                continue
+            m_c = float(row_c.get('Monto-Conta', 0) or 0)
+            if (m_c > 0) != (suma_b > 0):
+                continue
+            diff = round(abs(abs(m_c) - abs(suma_b)), 2)
+            if diff <= 0.01:
+                f_c = row_c.get('Fecha')
+                dias_min = None
+                if pd.notna(f_c) and fechas_b:
+                    dias_min = min(abs((f_c - fb).days) for fb in fechas_b)
+                cands_c.append((c_idx, diff, dias_min, row_c))
+
+        elegido_c = None
+        if len(cands_c) == 1:
+            c_idx, diff, dias_min, row_c = cands_c[0]
+            if dias_min is not None and dias_min <= 5:
+                elegido_c = c_idx
+            elif dias_min is None or es_banco_nacion or abs(suma_b) >= 1000:
+                f_c = row_c.get('Fecha')
+                if pd.notna(f_c) and fechas_b:
+                    if any(f_c.year == fb.year and f_c.month == fb.month for fb in fechas_b):
+                        elegido_c = c_idx
+                else:
+                    elegido_c = c_idx
+        elif len(cands_c) > 1:
+            cands_glosa = [
+                c for c in cands_c
+                if (es_banco_nacion and re.search(r'(?i)\bDETRACC\w*\b', str(c[3].get('Conta - Glosa', '')))) or
+                   (op_b in str(c[3].get('Conta - Glosa', '')))
+            ]
+            if len(cands_glosa) == 1:
+                elegido_c = cands_glosa[0][0]
+            else:
+                cands_con_dias = [c for c in cands_c if c[2] is not None]
+                if cands_con_dias:
+                    cands_con_dias.sort(key=lambda x: x[2])
+                    if len(cands_con_dias) == 1 or cands_con_dias[0][2] < cands_con_dias[1][2]:
+                        elegido_c = cands_con_dias[0][0]
+
+        if elegido_c is not None:
+            c_idx = elegido_c
+            glosa_c = str(conta_ext.at[c_idx, 'Conta - Glosa'] or '')
+            es_detracc = es_banco_nacion or bool(re.search(r'(?i)\bDETRACC\w*\b', glosa_c))
+
+            op_link = f"SUG-LOTE-{op_b}"
+            if es_detracc:
+                anot = f"Sugerido: {len(b_idxs_validos)} Banco = 1 Conta (Detracciones Lote {op_b})"
+            else:
+                anot = f"Sugerido: {len(b_idxs_validos)} Banco = 1 Conta (Lote {op_b})"
+
+            conta_ext.at[c_idx, '# Operación2'] = op_link
+            conta_ext.at[c_idx, 'Anotación'] = anot
+            conta_ext.at[c_idx, '_suggested'] = True
+
+            for b_i in b_idxs_validos:
+                banco_ext.at[b_i, '# Operación2'] = op_link
+                banco_ext.at[b_i, 'Anotación'] = anot
+        else:
+            # Buscar coincidencia con un Asiento Contable completo (# Registro)
+            asientos_cand = {}
+            for c_idx, row_c in conta_ext.iterrows():
+                if row_c['_matched'] or row_c.get('_suggested', False) or str(row_c.get('Anotación', '')).startswith('Sugerido'):
+                    continue
+                reg = _normalizar_nro_op(row_c.get('Conta - # Registro'))
+                if reg and reg not in ('0', 'nan'):
+                    asientos_cand.setdefault(reg, []).append(c_idx)
+
+            for reg, c_idxs_reg in list(asientos_cand.items()):
+                if len(c_idxs_reg) >= 2:
+                    suma_reg = round(sum(float(conta_ext.at[i, 'Monto-Conta'] or 0) for i in c_idxs_reg), 2)
+                    if (suma_reg > 0) == (suma_b > 0) and round(abs(abs(suma_reg) - abs(suma_b)), 2) <= 0.01:
+                        op_link = f"SUG-LOTE-{op_b}"
+                        anot = f"Sugerido: {len(b_idxs_validos)} Banco = Asiento Conta {reg} (Lote {op_b})"
+                        for i in c_idxs_reg:
+                            conta_ext.at[i, '# Operación2'] = op_link
+                            conta_ext.at[i, 'Anotación'] = anot
+                            conta_ext.at[i, '_suggested'] = True
+                        for b_i in b_idxs_validos:
+                            banco_ext.at[b_i, '# Operación2'] = op_link
+                            banco_ext.at[b_i, 'Anotación'] = anot
+                        break
 
     # 4.4. Sugerencia por ITF (Suma de 'IMPUESTO ITF' en Banco = Movimiento con 'ITF' en Glosa Conta)
     mask_itf_b = (
@@ -748,7 +1009,6 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
                         break
 
     # 4.7. Sugerencias por Sub-código / Referencia (ej. P07, P08) en Descripción de Banco y Glosa/Giro de Contabilidad + Monto igual
-    import re
     for c_idx, row_c in conta_ext.iterrows():
         if row_c['_matched']: continue
         if row_c.get('_suggested', False): continue
@@ -865,27 +1125,297 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             banco_ext.at[b_idx_rem, 'Anotación'] = anot_rem
             conta_ext.at[c_idx_rem, 'Anotación'] = anot_rem
             conta_ext.at[c_idx_rem, '_suggested'] = True
-        m_b = float(row_b.get('Monto-Banco', 0) or 0)
-        
-        for c_idx, row_c in conta_ext.iterrows():
-            if row_c['_matched']: continue
-            if row_c.get('_suggested', False): continue
-            if str(conta_ext.at[c_idx, 'Anotación']).startswith('Sugerido'): continue
-            
-            m_c = float(row_c.get('Monto-Conta', 0) or 0)
-            
-            diff = round(abs(abs(m_b) - abs(m_c)), 2)
-            if diff in diferencias:
-                op_link = f"SUG-DIF-{diff}-{b_idx}"
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 6. CONCILIACIÓN DE ASIENTOS CONTABLES AGRUPADOS Y VARIOS A VARIOS (N a M)
+    # ══════════════════════════════════════════════════════════════════════
+    # Regla:
+    # 1. Si 2 o más movimientos de conta tienen el mismo asiento contable
+    #    ('Conta - # Registro'), se suman sus montos y se cuentan como 1 para la conciliación.
+    # 2. Se ejecuta después de todas las conciliaciones 1 a 1 y 1 a muchos.
+    # 3. Concilia varios asientos de banco contra asiento(s) de conta,
+    #    especialmente ITF y Comisiones/Portes/Gastos Bancarios.
+
+    idxs_unm_b = [
+        idx for idx, r in banco_ext.iterrows()
+        if not r['_matched'] and not str(banco_ext.at[idx, 'Anotación']).startswith('Sugerido')
+    ]
+    idxs_unm_c = [
+        idx for idx, r in conta_ext.iterrows()
+        if not r['_matched'] and not r.get('_suggested', False) and not str(conta_ext.at[idx, 'Anotación']).startswith('Sugerido')
+    ]
+
+    # Agrupar conta por asiento contable (Conta - # Registro)
+    asientos_map = {}
+    for c_idx in idxs_unm_c:
+        reg = _normalizar_nro_op(conta_ext.at[c_idx, 'Conta - # Registro'])
+        clave = reg if (reg and reg not in ('0', 'nan')) else f"__ROW_{c_idx}__"
+        asientos_map.setdefault(clave, []).append(c_idx)
+
+    asientos_conta = []
+    for clave, c_idxs in asientos_map.items():
+        total_asiento = round(sum(float(conta_ext.at[i, 'Monto-Conta'] or 0) for i in c_idxs), 2)
+        nro_reg = clave if not clave.startswith('__ROW_') else ''
+        es_gasto = any(
+            bool(re.search(r'(?i)\b(ITF|I\.T\.F\.)\b|COMIS|PORTES?|MANTENIMIENTO|GASTOS?\s+BANCARIOS?',
+                           f"{conta_ext.at[i, 'Conta - Glosa']} {conta_ext.at[i, 'Conta - Giro']}"))
+            for i in c_idxs
+        )
+        asientos_conta.append({
+            'clave': clave,
+            'nro_registro': nro_reg,
+            'idxs': c_idxs,
+            'monto': total_asiento,
+            'count': len(c_idxs),
+            'es_gasto': es_gasto,
+        })
+
+    # 6.1 Varios Banco = Asiento(s) Conta de Gastos Bancarios (ITF, Comisiones, Portes)
+    patron_gastos_b = re.compile(
+        r'(?i)\b(ITF|I\.T\.F\.)\b|'
+        r'IMPUESTO\s+(?:A\s+LOS\s+(?:DEBITOS|CREDITOS)|ITF|TRANSACCIONES)|'
+        r'COMIS|PORTES?|MANT\.?\s*CUENTA|MANTENIMIENTO|GASTO\s+BANCARIO|CARGO\s+POR\s+CUENTA',
+        re.IGNORECASE
+    )
+
+    b_gastos_idxs = [
+        b_idx for b_idx in idxs_unm_b
+        if patron_gastos_b.search(str(banco_ext.at[b_idx, 'Banco - Descripción'] or ''))
+    ]
+    c_gastos_asientos = [
+        a for a in asientos_conta
+        if a['es_gasto'] and a['monto'] != 0
+    ]
+
+    if b_gastos_idxs and c_gastos_asientos:
+        suma_b_gastos = round(sum(float(banco_ext.at[b, 'Monto-Banco'] or 0) for b in b_gastos_idxs), 2)
+        suma_c_gastos = round(sum(a['monto'] for a in c_gastos_asientos), 2)
+
+        if suma_b_gastos != 0 and round(abs(abs(suma_b_gastos) - abs(suma_c_gastos)), 2) <= 0.01:
+            regs = [a['nro_registro'] for a in c_gastos_asientos if a['nro_registro']]
+            reg_desc = f"Asiento {regs[0]}" if len(regs) == 1 else (f"{len(c_gastos_asientos)} Asientos" if len(c_gastos_asientos) > 1 else "Conta")
+            op_link = f"SUG-ITF-COM-{regs[0]}" if (len(regs) == 1) else "SUG-ITF-COM-NxM"
+            anot = f"Sugerido: {len(b_gastos_idxs)} Banco = {reg_desc} (ITF y Comisiones)"
+
+            for b_idx in b_gastos_idxs:
                 banco_ext.at[b_idx, '# Operación2'] = op_link
+                banco_ext.at[b_idx, 'Anotación'] = anot
+                if b_idx in idxs_unm_b:
+                    idxs_unm_b.remove(b_idx)
+
+            for a in c_gastos_asientos:
+                for c_idx in a['idxs']:
+                    conta_ext.at[c_idx, '# Operación2'] = op_link
+                    conta_ext.at[c_idx, 'Anotación'] = anot
+                    conta_ext.at[c_idx, '_suggested'] = True
+                if a in asientos_conta:
+                    asientos_conta.remove(a)
+
+    # 6.2 1 Banco = 1 Asiento Conta (cuando el asiento suma 2 o más filas de conta)
+    for a in list(asientos_conta):
+        if a['count'] < 2 or a['monto'] == 0:
+            continue
+        m_asiento = a['monto']
+        cands_b = [
+            b_idx for b_idx in idxs_unm_b
+            if abs(float(banco_ext.at[b_idx, 'Monto-Banco'] or 0) - m_asiento) <= 0.01
+        ]
+        if len(cands_b) == 1:
+            b_idx = cands_b[0]
+            op_link = f"SUG-ASIENTO-{a['nro_registro'] or b_idx}"
+            anot = f"Sugerido: 1 Banco = Asiento Conta {a['nro_registro']} (Suma de {a['count']} filas)"
+            banco_ext.at[b_idx, '# Operación2'] = op_link
+            banco_ext.at[b_idx, 'Anotación'] = anot
+            idxs_unm_b.remove(b_idx)
+            for c_idx in a['idxs']:
                 conta_ext.at[c_idx, '# Operación2'] = op_link
-                
-                banco_ext.at[b_idx, 'Anotación'] = f"Sugerido: Diferencia {diff}"
-                conta_ext.at[c_idx, 'Anotación'] = f"Sugerido: Diferencia {diff}"
-                
+                conta_ext.at[c_idx, 'Anotación'] = anot
                 conta_ext.at[c_idx, '_suggested'] = True
+            asientos_conta.remove(a)
+
+    # 6.3 N Banco = 1 Asiento Conta (asiento con 2+ filas o remanente)
+    for a in list(asientos_conta):
+        m_asiento = a['monto']
+        if m_asiento == 0:
+            continue
+        pool_b_cand = [
+            (b_idx, float(banco_ext.at[b_idx, 'Monto-Banco'] or 0))
+            for b_idx in idxs_unm_b
+            if (float(banco_ext.at[b_idx, 'Monto-Banco'] or 0) > 0) == (m_asiento > 0)
+        ]
+        if not pool_b_cand or len(pool_b_cand) < 2:
+            continue
+        # Guard anti-explosión combinatoria: si hay demasiados candidatos de banco,
+        # el número de combinaciones sería intratable (C(30,6) ya > 590k). Omitir.
+        if len(pool_b_cand) > 25:
+            continue
+
+        combos_validos = []
+        for r in range(2, min(6, len(pool_b_cand) + 1)):
+            for combo in combinations(pool_b_cand, r):
+                if round(abs(sum(x[1] for x in combo) - m_asiento), 2) <= 0.01:
+                    combos_validos.append(combo)
+                    if len(combos_validos) > 1:
+                        break
+            if combos_validos:
                 break
-                
+
+        if len(combos_validos) == 1:
+            combo_elegido = combos_validos[0]
+            b_idxs_combo = [x[0] for x in combo_elegido]
+            op_link = f"SUG-SUM-ASIENTO-{a['nro_registro'] or b_idxs_combo[0]}"
+            filas_txt = f" (Suma de {a['count']} filas conta)" if a['count'] > 1 else ""
+            anot = f"Sugerido: {len(b_idxs_combo)} Banco = Asiento Conta {a['nro_registro']}{filas_txt}"
+            for b_idx in b_idxs_combo:
+                banco_ext.at[b_idx, '# Operación2'] = op_link
+                banco_ext.at[b_idx, 'Anotación'] = anot
+                idxs_unm_b.remove(b_idx)
+            for c_idx in a['idxs']:
+                conta_ext.at[c_idx, '# Operación2'] = op_link
+                conta_ext.at[c_idx, 'Anotación'] = anot
+                conta_ext.at[c_idx, '_suggested'] = True
+            asientos_conta.remove(a)
+
+    # 6.4 Varios Banco = Varios Asientos Conta (N Banco = M Asientos general)
+    if len(asientos_conta) >= 2 and len(idxs_unm_b) >= 2:
+        for r_c in range(2, min(5, len(asientos_conta) + 1)):
+            matched_nm = False
+            for combo_c in combinations(asientos_conta, r_c):
+                suma_c_combo = round(sum(a['monto'] for a in combo_c), 2)
+                if suma_c_combo == 0:
+                    continue
+                pool_b_cand = [
+                    (b_idx, float(banco_ext.at[b_idx, 'Monto-Banco'] or 0))
+                    for b_idx in idxs_unm_b
+                    if (float(banco_ext.at[b_idx, 'Monto-Banco'] or 0) > 0) == (suma_c_combo > 0)
+                ]
+                combos_b_validos = []
+                for r_b in range(2, min(8, len(pool_b_cand) + 1)):
+                    for combo_b in combinations(pool_b_cand, r_b):
+                        if round(abs(sum(x[1] for x in combo_b) - suma_c_combo), 2) <= 0.01:
+                            combos_b_validos.append(combo_b)
+                            if len(combos_b_validos) > 1:
+                                break
+                    if combos_b_validos:
+                        break
+                if len(combos_b_validos) == 1:
+                    combo_b_elegido = combos_b_validos[0]
+                    b_idxs_combo = [x[0] for x in combo_b_elegido]
+                    op_link = "SUG-NxM-ASIENTOS"
+                    anot = f"Sugerido: {len(b_idxs_combo)} Banco = {len(combo_c)} Asientos Conta"
+                    for b_idx in b_idxs_combo:
+                        banco_ext.at[b_idx, '# Operación2'] = op_link
+                        banco_ext.at[b_idx, 'Anotación'] = anot
+                        idxs_unm_b.remove(b_idx)
+                    for a in combo_c:
+                        for c_idx in a['idxs']:
+                            conta_ext.at[c_idx, '# Operación2'] = op_link
+                            conta_ext.at[c_idx, 'Anotación'] = anot
+                            conta_ext.at[c_idx, '_suggested'] = True
+                        asientos_conta.remove(a)
+                    matched_nm = True
+                    break
+            if matched_nm:
+                break
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 6.5 ÚLTIMA OPCIÓN: N Banco = 1 Conta / 1 Banco = N Conta sin fecha
+    # ══════════════════════════════════════════════════════════════════════
+    # Condición de activación: quedan menos de 10 movimientos sin conciliar
+    # en al menos uno de los dos lados.
+    # Solo acepta diferencia == 0.0 (monto exacto) y solución única para
+    # evitar falsos positivos al ignorar la restricción de fecha.
+    # Itera eliminando los ya asignados en cada vuelta hasta no haber cambios.
+    _cambio_6b = True
+    while _cambio_6b:
+        _cambio_6b = False
+
+        _unm_b_6b = [
+            (idx, round(float(banco_ext.at[idx, 'Monto-Banco'] or 0), 2))
+            for idx, r in banco_ext[~banco_ext['_matched']].iterrows()
+            if not str(banco_ext.at[idx, 'Anotación']).startswith('Sugerido')
+        ]
+        _unm_c_6b = [
+            (idx, round(float(conta_ext.at[idx, 'Monto-Conta'] or 0), 2))
+            for idx, r in conta_ext[~conta_ext['_matched']].iterrows()
+            if not r.get('_suggested', False)
+            and not str(conta_ext.at[idx, 'Anotación']).startswith('Sugerido')
+        ]
+
+        # Activar solo si alguno de los dos lados tiene menos de 10 elementos
+        if len(_unm_b_6b) >= 10 and len(_unm_c_6b) >= 10:
+            break
+
+        _used_c_6b: set = set()
+        _used_b_6b: set = set()
+
+        # N Banco = 1 Conta (un movimiento de conta es cubierto por varios del banco)
+        for c_idx, c_amt in _unm_c_6b:
+            if c_amt == 0 or c_idx in _used_c_6b:
+                continue
+            avail_b = [x for x in _unm_b_6b if x[0] not in _used_b_6b]
+            if len(avail_b) < 2:
+                continue
+            # Guard anti-explosión combinatoria
+            if len(avail_b) > 30:
+                continue
+            # Buscar la combinación única que sume exactamente c_amt
+            _valid: list = []
+            for _r in range(2, min(len(avail_b) + 1, 10)):
+                for combo in combinations(avail_b, _r):
+                    if round(abs(abs(sum(x[1] for x in combo)) - abs(c_amt)), 2) == 0.0:
+                        _valid.append(combo)
+                    if len(_valid) > 1:
+                        break
+                if len(_valid) > 1:
+                    break
+            if len(_valid) == 1:
+                b_idxs_sel = [x[0] for x in _valid[0]]
+                _used_b_6b.update(b_idxs_sel)
+                _used_c_6b.add(c_idx)
+                op_link = f"SUG-LAST-C{c_idx}"
+                anot = 'Sugerido: N Banco = 1 Conta (fechas distintas)'
+                conta_ext.at[c_idx, '# Operación2'] = op_link
+                conta_ext.at[c_idx, 'Anotación'] = anot
+                conta_ext.at[c_idx, '_suggested'] = True
+                for b_idx in b_idxs_sel:
+                    banco_ext.at[b_idx, '# Operación2'] = op_link
+                    banco_ext.at[b_idx, 'Anotación'] = anot
+                _cambio_6b = True
+
+        # 1 Banco = N Conta (un movimiento de banco es cubierto por varios de conta)
+        for b_idx, b_amt in _unm_b_6b:
+            if b_amt == 0 or b_idx in _used_b_6b:
+                continue
+            avail_c = [x for x in _unm_c_6b if x[0] not in _used_c_6b]
+            if len(avail_c) < 2:
+                continue
+            # Guard anti-explosión combinatoria
+            if len(avail_c) > 30:
+                continue
+            _valid = []
+            for _r in range(2, min(len(avail_c) + 1, 10)):
+                for combo in combinations(avail_c, _r):
+                    if round(abs(abs(sum(x[1] for x in combo)) - abs(b_amt)), 2) == 0.0:
+                        _valid.append(combo)
+                    if len(_valid) > 1:
+                        break
+                if len(_valid) > 1:
+                    break
+            if len(_valid) == 1:
+                c_idxs_sel = [x[0] for x in _valid[0]]
+                _used_c_6b.update(c_idxs_sel)
+                _used_b_6b.add(b_idx)
+                op_link = f"SUG-LAST-B{b_idx}"
+                anot = 'Sugerido: 1 Banco = N Conta (fechas distintas)'
+                banco_ext.at[b_idx, '# Operación2'] = op_link
+                banco_ext.at[b_idx, 'Anotación'] = anot
+                for c_idx in c_idxs_sel:
+                    conta_ext.at[c_idx, '# Operación2'] = op_link
+                    conta_ext.at[c_idx, 'Anotación'] = anot
+                    conta_ext.at[c_idx, '_suggested'] = True
+                _cambio_6b = True
+
     if '_suggested' in conta_ext.columns:
         conta_ext = conta_ext.drop(columns=['_suggested'])
 
@@ -1020,7 +1550,7 @@ def _sugerencias_meses_anteriores(
     return banco_ext, conta_ext
 
 
-def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: str = "Dolares (USD)") -> pd.DataFrame:
+def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: str = "Dolares (USD)", banco: str = "") -> pd.DataFrame:
     """
     Une Tab_Banco y Tab_Contanet verticalmente con todas las columnas combinadas.
     Las columnas que no existen en una tabla quedan en NaN (el especialista las llena).
@@ -1063,7 +1593,7 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
             conta_ext[col] = conta_ext[col].astype(object)
     
     # ── APLICAR ALGORITMO DE CONCILIACIÓN AUTOMÁTICA ──
-    banco_ext, conta_ext = _conciliacion_automatica(banco_ext, conta_ext, moneda=moneda)
+    banco_ext, conta_ext = _conciliacion_automatica(banco_ext, conta_ext, moneda=moneda, banco=banco)
 
     # ── SUGERENCIAS POR MESES ANTERIORES (pendientes de conciliaciones previas) ──
     # Se ejecuta DESPUÉS de la conciliación normal para que los movimientos del
@@ -1215,14 +1745,40 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
     _difs_comision = _diferencias_comision(moneda)
 
     def _marcar_itf(row):
-        desc = str(row.get('Banco - Descripción', '') or '')
-        return 'X' if 'ITF' in desc.upper() else ''
+        desc = str(row.get('Banco - Descripción', '') or '').upper().strip()
+        if not desc:
+            return ''
+        if 'ITF' in desc or 'IMPUESTO A LOS CREDITOS' in desc or 'IMPUESTO A LOS DEBITOS' in desc:
+            return 'X'
+        return ''
+
+    def _es_comision_scotiabank_desc(desc: str) -> bool:
+        if not desc:
+            return False
+        d_upper = desc.upper().strip()
+        # Descripciones exactas o contenidas
+        conceptos_fijos = [
+            'TBK-MANTENIMIENTO',
+            'PORTES ESTADO DE CUENTA',
+            'MANT TBK CORPO EMP RELAC',
+            'COMIS.TRF.CTAS 3ROS BCR',
+        ]
+        if any(c in d_upper for c in conceptos_fijos):
+            return True
+        # Comiencen con la palabra Comis y Mant. (soporta COMIS, COMIS., COMISION, MANT, MANT., MANTENIMIENTO)
+        if re.match(r'^(?:COMIS|MANT)\b|\bCOMIS\b|\bMANT\b', d_upper):
+            return True
+        return False
 
     def _marcar_comisiones(row):
         # Si la fila ya es ITF, no marcar también como comisión
-        desc = str(row.get('Banco - Descripción', '') or '')
-        if 'ITF' in desc.upper():
+        if _marcar_itf(row) == 'X':
             return ''
+        desc = str(row.get('Banco - Descripción', '') or '')
+        # Regla explícita por descripción de banco
+        if _es_comision_scotiabank_desc(desc):
+            return 'X'
+
         dif = row.get('DIF COMISON')
         try:
             dif_f = float(dif) if dif is not None else 0.0
@@ -1267,7 +1823,8 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
     # 0 = Conciliados (MAR == 'X')
     # 1 = Faltan conciliar pero tienen sugerencia ('Sugerido:' en Anotación)
     # 2 = Mov. solo en banco / Mov. solo en conta
-    # 4 = ITF no sugerido (descripción contiene 'ITF')
+    # 3 = Comisiones no sugeridas
+    # 4 = ITF no sugerido
     # 5 = Sin monto (ingreso=0 y egreso=0)
     def _orden_grupo(row):
         anotacion = str(row.get('Anotación', ''))
@@ -1279,8 +1836,11 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
         # Sugeridos (faltan conciliar pero tienen sugerencia, incluyendo ITF sugerido)
         if 'Sugerido:' in anotacion:
             return 1
-        # ITF no sugerido: al final pero antes de sin-monto
-        if 'ITF' in str(row.get('Banco - Descripción', '')).upper():
+        # Comisiones no sugeridas
+        if row.get('Comisiones') == 'X':
+            return 3
+        # ITF no sugerido
+        if row.get('ITF') == 'X':
             return 4
         # Solo en banco o solo en conta
         return 2
