@@ -15,6 +15,7 @@ Uso:
 """
 
 import re
+import time
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
@@ -49,14 +50,22 @@ def generar_reporte_inicial(
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         ruta_salida = Path(f"Conciliacion_Inicial_{ts}.xlsx")
 
+    _t0 = time.perf_counter()
+
     # ── Preparar Tab_Banco ────────────────────────────────────────────
     tab_banco = _preparar_tab_banco(bank)
 
     # ── Preparar Tab_Contanet ─────────────────────────────────────────
     tab_conta = _preparar_tab_contanet(conta)
 
+    _t1 = time.perf_counter()
+    print(f"  [TIEMPO] Preparar tablas: {_t1 - _t0:.2f}s")
+
     # ── Preparar Anexar1 (union vertical) ─────────────────────────────
     anexar1 = _preparar_anexar1(tab_banco, tab_conta, moneda=moneda, banco=banco)
+
+    _t2 = time.perf_counter()
+    print(f"  [TIEMPO] Conciliación (Anexar1): {_t2 - _t1:.2f}s")
 
     # ── Preparar Resumen ──────────────────────────────────────────────
     resumen = _preparar_resumen(anexar1)
@@ -86,11 +95,20 @@ def generar_reporte_inicial(
             ws_ini.cell(row=1, column=32).value = '__CUENTA__'
             ws_ini.cell(row=2, column=32).value = cuenta
 
+    _t3 = time.perf_counter()
+    print(f"  [TIEMPO] Escribir Excel: {_t3 - _t2:.2f}s")
+
     # ── Aplicar formato visual Excel ──────────────────────────────────
     _aplicar_formato(ruta_salida)
 
+    _t4 = time.perf_counter()
+    print(f"  [TIEMPO] Aplicar formato: {_t4 - _t3:.2f}s")
+
     # ── Ocultar columnas técnicas en Anexar1 del reporte inicial ──────
     _ocultar_columnas_tecnicas(ruta_salida)
+
+    _t5 = time.perf_counter()
+    print(f"  [TIEMPO] TOTAL reporte inicial: {_t5 - _t0:.2f}s")
 
     print(f"\n  [OK] Reporte inicial generado: {ruta_salida}")
 
@@ -309,29 +327,96 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
                 return True
         return False
 
+    # ── Pre-normalizar # Operación UNA VEZ para evitar llamadas repetidas ────────
+    # Se calculan en vectores y se almacenan en columnas temporales _op_norm y _op_sufijo6.
+    import re as _re_inline
+
+    def _norm_series(ser: pd.Series) -> pd.Series:
+        """Normaliza la serie de # Operación a string limpio."""
+        s = ser.astype(str).str.strip()
+        s = s.where(~s.str.lower().isin(['nan', '0', 'none']), '')
+        s = s.where(~s.str.endswith('.0'), s.str[:-2].str.strip())
+        return s
+
+    banco_ext['_op_norm'] = _norm_series(banco_ext['Banco - # Operación'])
+    conta_ext['_op_norm'] = _norm_series(conta_ext['Conta - # Operación'])
+
+    # Sufijo de 6 dígitos (solo numéricos)
+    def _sufijo6(norm_op: str) -> str:
+        digits = _re_inline.sub(r'\D', '', norm_op)
+        return digits[-6:] if len(digits) >= 6 else ''
+
+    banco_ext['_op_suf6'] = banco_ext['_op_norm'].apply(_sufijo6)
+    conta_ext['_op_suf6'] = conta_ext['_op_norm'].apply(_sufijo6)
+    banco_ext['_monto_r'] = banco_ext['Monto-Banco'].fillna(0).astype(float).round(2)
+    conta_ext['_monto_r'] = conta_ext['Monto-Conta'].fillna(0).astype(float).round(2)
+
+    def _rebuild_suf6_index():
+        """Reconstruye el índice sufijo6 → [b_idxs] con los no conciliados actuales."""
+        idx: dict[str, list] = {}
+        for b_idx in banco_ext.index[~banco_ext['_matched']]:
+            suf = banco_ext.at[b_idx, '_op_suf6']
+            if suf:
+                idx.setdefault(suf, []).append(b_idx)
+        return idx
+
+    def _candidatos_por_op(c_idx, suf6_index) -> list:
+        """Devuelve b_idxs donde _coincide_nro_op vale True para el conta dado."""
+        op_c   = conta_ext.at[c_idx, '_op_norm']
+        suf6_c = conta_ext.at[c_idx, '_op_suf6']
+        if not op_c:
+            return []
+
+        candidatos: list = []
+        # Lookup por sufijo6 (hit rápido)
+        hits_suf6 = suf6_index.get(suf6_c, []) if suf6_c else []
+        for b_idx in hits_suf6:
+            if not banco_ext.at[b_idx, '_matched']:
+                candidatos.append(b_idx)
+        if candidatos:
+            return candidatos
+
+        # Fallback: comparación por sufijo textual (cubre nb.endswith, etc.)
+        sc_norm = op_c.lstrip('0') or op_c
+        variantes_c = [v for v in {op_c, sc_norm} if len(v) >= 4]
+        for b_idx in banco_ext.index[~banco_ext['_matched']]:
+            op_b = banco_ext.at[b_idx, '_op_norm']
+            if not op_b:
+                continue
+            sb_norm = op_b.lstrip('0') or op_b
+            # op_c es sufijo de op_b
+            for vc in variantes_c:
+                if op_b.endswith(vc):
+                    candidatos.append(b_idx)
+                    break
+            else:
+                # op_b es sufijo de op_c
+                variantes_b = [v for v in {op_b, sb_norm} if len(v) >= 4]
+                for vb in variantes_b:
+                    if op_c.endswith(vb):
+                        candidatos.append(b_idx)
+                        break
+        return candidatos
+
     # 1. Reglas por coincidencia de # Operación (exacto o sufijo)
     # 1.1 Mismo valor (Monto igual) -> Conciliación automática con "Auto: Sufijo de # Operación"
-    for c_idx, row_c in conta_ext.iterrows():
-        if row_c['_matched']: continue
-        op_c = _normalizar_nro_op(row_c.get('Conta - # Operación'))
+    suf6_idx = _rebuild_suf6_index()
+    for c_idx in conta_ext.index[~conta_ext['_matched']]:
+        op_c = conta_ext.at[c_idx, '_op_norm']
         if not op_c: continue
-        m_c = float(row_c.get('Monto-Conta', 0) or 0)
+        m_c = conta_ext.at[c_idx, '_monto_r']
         if m_c == 0: continue
 
-        candidatos_b = []
-        for b_idx, row_b in banco_ext[~banco_ext['_matched']].iterrows():
-            op_b = _normalizar_nro_op(row_b.get('Banco - # Operación'))
-            if not op_b: continue
-            if _coincide_nro_op(op_b, op_c):
-                m_b = float(row_b.get('Monto-Banco', 0) or 0)
-                if abs(m_b - m_c) <= 0.01:
-                    candidatos_b.append(b_idx)
+        candidatos_b = [
+            b for b in _candidatos_por_op(c_idx, suf6_idx)
+            if abs(banco_ext.at[b, '_monto_r'] - m_c) <= 0.01
+        ]
 
         b_idx_elegido = None
         if len(candidatos_b) == 1:
             b_idx_elegido = candidatos_b[0]
         elif len(candidatos_b) > 1:
-            cands_fecha = [b for b in candidatos_b if banco_ext.at[b, 'Fecha'] == row_c['Fecha']]
+            cands_fecha = [b for b in candidatos_b if banco_ext.at[b, 'Fecha'] == conta_ext.at[c_idx, 'Fecha']]
             if len(cands_fecha) == 1:
                 b_idx_elegido = cands_fecha[0]
             else:
@@ -339,7 +424,7 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
 
         if b_idx_elegido is not None:
             b_idx = b_idx_elegido
-            op_b = _normalizar_nro_op(banco_ext.at[b_idx, 'Banco - # Operación'])
+            op_b = banco_ext.at[b_idx, '_op_norm']
             banco_ext.at[b_idx, '_matched'] = True
             conta_ext.at[c_idx, '_matched'] = True
             banco_ext.at[b_idx, 'MAR'] = 'X'
@@ -351,30 +436,27 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             conta_ext.at[c_idx, 'Anotación'] = 'Auto: Sufijo de # Operación'
 
     # 1.2 Diferencia en los montos correspondiente a comisiones -> Conciliación automática con "Auto: Sufijo de # Operación"
-    for c_idx, row_c in conta_ext.iterrows():
-        if row_c['_matched']: continue
-        op_c = _normalizar_nro_op(row_c.get('Conta - # Operación'))
+    suf6_idx = _rebuild_suf6_index()
+    for c_idx in conta_ext.index[~conta_ext['_matched']]:
+        op_c = conta_ext.at[c_idx, '_op_norm']
         if not op_c: continue
-        m_c = float(row_c.get('Monto-Conta', 0) or 0)
+        m_c = conta_ext.at[c_idx, '_monto_r']
         if m_c == 0: continue
 
         candidatos_b = []
-        for b_idx, row_b in banco_ext[~banco_ext['_matched']].iterrows():
-            op_b = _normalizar_nro_op(row_b.get('Banco - # Operación'))
-            if not op_b: continue
-            if _coincide_nro_op(op_b, op_c):
-                m_b = float(row_b.get('Monto-Banco', 0) or 0)
-                if (m_b > 0) == (m_c > 0):
-                    dif = round(abs(m_b - m_c), 2)
-                    if dif in diferencias_set:
-                        candidatos_b.append((b_idx, round(m_b - m_c, 2)))
+        for b_idx in _candidatos_por_op(c_idx, suf6_idx):
+            m_b = banco_ext.at[b_idx, '_monto_r']
+            if (m_b > 0) == (m_c > 0):
+                dif = round(abs(m_b - m_c), 2)
+                if dif in diferencias_set:
+                    candidatos_b.append((b_idx, round(m_b - m_c, 2)))
 
         b_idx_elegido = None
         dif_elegido = 0.0
         if len(candidatos_b) == 1:
             b_idx_elegido, dif_elegido = candidatos_b[0]
         elif len(candidatos_b) > 1:
-            cands_fecha = [(b, d) for (b, d) in candidatos_b if banco_ext.at[b, 'Fecha'] == row_c['Fecha']]
+            cands_fecha = [(b, d) for (b, d) in candidatos_b if banco_ext.at[b, 'Fecha'] == conta_ext.at[c_idx, 'Fecha']]
             if len(cands_fecha) == 1:
                 b_idx_elegido, dif_elegido = cands_fecha[0]
             else:
@@ -382,7 +464,7 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
 
         if b_idx_elegido is not None:
             b_idx = b_idx_elegido
-            op_b = _normalizar_nro_op(banco_ext.at[b_idx, 'Banco - # Operación'])
+            op_b = banco_ext.at[b_idx, '_op_norm']
             banco_ext.at[b_idx, '_matched'] = True
             conta_ext.at[c_idx, '_matched'] = True
             banco_ext.at[b_idx, 'MAR'] = 'X'
@@ -398,25 +480,22 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
     if '_suggested' not in conta_ext.columns:
         conta_ext['_suggested'] = False
 
-    for c_idx, row_c in conta_ext.iterrows():
-        if row_c['_matched']: continue
+    suf6_idx = _rebuild_suf6_index()
+    for c_idx in conta_ext.index[~conta_ext['_matched']]:
         if conta_ext.at[c_idx, '_suggested']: continue
-        op_c = _normalizar_nro_op(row_c.get('Conta - # Operación'))
+        op_c = conta_ext.at[c_idx, '_op_norm']
         if not op_c: continue
-        m_c = float(row_c.get('Monto-Conta', 0) or 0)
+        m_c = conta_ext.at[c_idx, '_monto_r']
         if m_c == 0: continue
 
         candidatos_b = []
-        for b_idx, row_b in banco_ext[~banco_ext['_matched']].iterrows():
+        for b_idx in _candidatos_por_op(c_idx, suf6_idx):
             if str(banco_ext.at[b_idx, 'Anotación']).startswith('Sugerido'): continue
-            op_b = _normalizar_nro_op(row_b.get('Banco - # Operación'))
-            if not op_b: continue
-            if _coincide_nro_op(op_b, op_c):
-                m_b = float(row_b.get('Monto-Banco', 0) or 0)
-                if (m_b > 0) == (m_c > 0):
-                    dif = round(abs(m_b - m_c), 2)
-                    if dif > 0.01 and dif not in diferencias_set:
-                        candidatos_b.append((b_idx, dif))
+            m_b = banco_ext.at[b_idx, '_monto_r']
+            if (m_b > 0) == (m_c > 0):
+                dif = round(abs(m_b - m_c), 2)
+                if dif > 0.01 and dif not in diferencias_set:
+                    candidatos_b.append((b_idx, dif))
 
         b_idx_elegido = None
         dif_elegido = 0.0
@@ -429,7 +508,7 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
 
         if b_idx_elegido is not None:
             b_idx = b_idx_elegido
-            op_b = _normalizar_nro_op(banco_ext.at[b_idx, 'Banco - # Operación'])
+            op_b = banco_ext.at[b_idx, '_op_norm']
             op_link = f"SUG-OP-DIF-{op_b or op_c}"
             banco_ext.at[b_idx, '# Operación2'] = op_link
             conta_ext.at[c_idx, '# Operación2'] = op_link
@@ -442,13 +521,12 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             banco_ext.at[b_idx, 'DIF COMISON'] = round(float(banco_ext.at[b_idx, 'Monto-Banco']) - float(conta_ext.at[c_idx, 'Monto-Conta']), 2)
 
     # 1.5 # Operación de Conta contenido en Descripción de Banco + Monto igual
-    for c_idx, row_c in conta_ext.iterrows():
-        if row_c['_matched']: continue
-        op_c = str(row_c.get('Conta - # Operación', '')).strip()
+    for c_idx in conta_ext.index[~conta_ext['_matched']]:
+        op_c = conta_ext.at[c_idx, '_op_norm']
         # Evitar falsos positivos requiriendo al menos 4 caracteres en la operación
-        if not op_c or op_c == 'nan' or op_c == '0' or len(op_c) < 4: continue
+        if not op_c or len(op_c) < 4: continue
         
-        m_c = float(row_c.get('Monto-Conta', 0) or 0)
+        m_c = conta_ext.at[c_idx, '_monto_r']
         
         candidates = banco_ext[
             (~banco_ext['_matched']) & 
@@ -1920,6 +1998,31 @@ def _aplicar_formato(ruta: Path) -> None:
     thin = Side(style='thin', color='D9D9D9')
     borde = Border(left=thin, right=thin, top=thin, bottom=thin)
 
+    # ── Objetos de estilo compartidos (se crean UNA vez, no por celda) ───────
+    _font_header     = Font(bold=True, color='FFFFFF', size=10)
+    _align_header    = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    _align_center    = Alignment(horizontal='center', vertical='center')
+    _align_vcenter   = Alignment(vertical='center')
+    _num_fmt_date    = 'DD/MM/YYYY'
+    _num_fmt_amount  = '#,##0.00'
+
+    # Caché de objetos PatternFill y Font por color/estilo (evita recrear los mismos)
+    _fill_cache: dict[str, PatternFill] = {}
+    _font_cache: dict[tuple, Font]      = {}
+
+    def _get_fill(color_hex: str) -> PatternFill:
+        if color_hex not in _fill_cache:
+            _fill_cache[color_hex] = PatternFill('solid', fgColor=color_hex)
+        return _fill_cache[color_hex]
+
+    def _get_font(color: str = '000000', bold: bool = False, italic: bool = False, size: int = 11) -> Font:
+        key = (color, bold, italic, size)
+        if key not in _font_cache:
+            _font_cache[key] = Font(color=color, bold=bold, italic=italic, size=size)
+        return _font_cache[key]
+
+    _fill_none = _get_fill('FFFFFF')  # blanco (sin relleno efectivo pero evita None)
+
     for nombre_hoja in wb.sheetnames:
         ws = wb[nombre_hoja]
         color_hex = _COLORES.get(nombre_hoja, '404040')
@@ -1932,25 +2035,29 @@ def _aplicar_formato(ruta: Path) -> None:
             'Otros'      : '70AD47',  # Verde claro
         }
 
-        # Formato de cabecera (fila 1)
-        for cell in ws[1]:
-            col_name = str(cell.value)
-            
-            if nombre_hoja == 'Anexar1':
+        # ── Pre-calcular fills de cabecera por columna (solo para Anexar1) ──
+        header_fill_map: dict[int, str] = {}  # col_idx → color_hex
+        if nombre_hoja == 'Anexar1':
+            for i, cell in enumerate(ws[1]):
+                col_name = str(cell.value or '')
                 if col_name in _COLORES_CLASIF:
-                    fg = _COLORES_CLASIF[col_name]
+                    header_fill_map[i] = _COLORES_CLASIF[col_name]
                 elif 'Banco' in col_name:
-                    fg = '1F4E79'  # Azul oscuro para Banco
+                    header_fill_map[i] = '1F4E79'
                 elif 'Conta' in col_name:
-                    fg = '375623'  # Verde oscuro para Contanet
+                    header_fill_map[i] = '375623'
                 else:
-                    fg = '7030A0'  # Morado para columnas de conciliación/comunes
-            else:
-                fg = color_hex
-                
-            cell.font      = Font(bold=True, color='FFFFFF', size=10)
-            cell.fill      = PatternFill('solid', fgColor=fg)
-            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                    header_fill_map[i] = '7030A0'
+        else:
+            for i in range(ws.max_column):
+                header_fill_map[i] = color_hex
+
+        # Formato de cabecera (fila 1)
+        for i, cell in enumerate(ws[1]):
+            fg = header_fill_map.get(i, color_hex)
+            cell.font      = _get_font('FFFFFF', bold=True, size=10)
+            cell.fill      = _get_fill(fg)
+            cell.alignment = _align_header
             cell.border    = borde
 
         # Altura de cabecera
@@ -1962,30 +2069,28 @@ def _aplicar_formato(ruta: Path) -> None:
         col_conc_idx = None
         col_no_conc_idx = None
         col_op2_idx = None
-        for i, cell in enumerate(ws[1]):
-            val = str(cell.value).strip()
-            if val == 'MAR':
-                col_mar_idx = i
-            elif val == 'Anotación':
-                col_anot_idx = i
-            elif val == 'Conciliar':
-                col_conc_idx = i
-            elif val == '# Operación a Conciliar' or val == 'No Conciliar':
-                col_no_conc_idx = i
-            elif val == '# Operación2':
-                col_op2_idx = i
-
-        # Detectar índice de columna Banco - Descripción para ITF
         col_banco_desc_idx = None
-        for i, cell in enumerate(ws[1]):
-            if str(cell.value).strip() == 'Banco - Descripción':
-                col_banco_desc_idx = i
-                break
+        # ── Leer nombres de cabecera UNA vez y construir mapa ──────────────
+        header_names: list[str] = []
+        for cell in ws[1]:
+            val = str(cell.value or '').strip()
+            header_names.append(val)
+            if val == 'MAR':
+                col_mar_idx = len(header_names) - 1
+            elif val == 'Anotación':
+                col_anot_idx = len(header_names) - 1
+            elif val == 'Conciliar':
+                col_conc_idx = len(header_names) - 1
+            elif val in ('# Operación a Conciliar', 'No Conciliar'):
+                col_no_conc_idx = len(header_names) - 1
+            elif val == '# Operación2':
+                col_op2_idx = len(header_names) - 1
+            elif val == 'Banco - Descripción':
+                col_banco_desc_idx = len(header_names) - 1
 
         # Pre-calcular para Anexar1: asignar color de fondo alternado por grupo sugerido
-        # Colores alternados para grupos sugeridos (pares de filas banco↔conta)
-        COLORES_SUG = ['FFF2CC', 'FCE4D6']  # Amarillo claro / Salmón muy claro (alternados)
-        sug_group_colors = {}  # op2_key -> color hex
+        COLORES_SUG = ['FFF2CC', 'FCE4D6']
+        sug_group_colors: dict[str, str] = {}
         if nombre_hoja == 'Anexar1' and col_op2_idx is not None and col_anot_idx is not None:
             color_idx = 0
             for row in ws.iter_rows(min_row=2):
@@ -1997,98 +2102,91 @@ def _aplicar_formato(ruta: Path) -> None:
                         sug_group_colors[key] = COLORES_SUG[color_idx % len(COLORES_SUG)]
                         color_idx += 1
 
+        # ── Pre-construir fills para Banco/Conta columnas ──────────────────
+        _fill_banco   = _get_fill('D9E1F2')
+        _fill_conta   = _get_fill('E2EFDA')
+        _fill_sinmonto = _get_fill('F4CCFF')
+        _font_sinmonto = _get_font('7F7F7F', italic=True)
+        _font_itf      = _get_font('7F7F7F', italic=True)
+        _font_rojo     = _get_font('FF0000')
+        _font_sugerido = _get_font('7F3F00', bold=True)
+        _font_monto    = _get_font('0033CC', bold=True, size=11)
+
         # Formato de datos fila por fila
         for row in ws.iter_rows(min_row=2):
             es_rojo = False
             es_sugerido = False
             es_itf = False
             es_sin_monto = False
-            color_sug_grupo = None
+            color_sug_grupo: str | None = None
 
             if nombre_hoja == 'Anexar1' and col_mar_idx is not None:
                 val_mar = row[col_mar_idx].value
                 anot_val = str(row[col_anot_idx].value or '') if col_anot_idx is not None else ''
 
-                # Verificar si es sin monto
                 if 'sin monto (0)' in anot_val.lower():
                     es_sin_monto = True
                 elif 'Sugerido:' in anot_val:
                     es_sugerido = True
-                    # Obtener color del grupo sugerido
                     if col_op2_idx is not None:
                         op2_key = str(row[col_op2_idx].value or '')
                         color_sug_grupo = sug_group_colors.get(op2_key)
-                # Verificar si es ITF no sugerido
                 elif col_banco_desc_idx is not None and 'ITF' in str(row[col_banco_desc_idx].value or '').upper():
                     es_itf = True
                 elif val_mar != 'X':
                     es_rojo = True
 
             for idx, cell in enumerate(row):
-                cell.alignment = Alignment(vertical='center')
+                cell.alignment = _align_vcenter
                 cell.border    = borde
 
-                header_name = str(ws.cell(row=1, column=idx + 1).value or '') if nombre_hoja == 'Anexar1' else ''
+                header_name = header_names[idx] if idx < len(header_names) else ''
 
-                # Columnas de clasificación de diferencias: centrar y colorear la X
+                # Columnas de clasificación: centrar y colorear la X
                 if nombre_hoja == 'Anexar1' and header_name in _COLORES_CLASIF:
-                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                    cell.alignment = _align_center
                     if cell.value == 'X':
-                        cell.font = Font(bold=True, color=_COLORES_CLASIF[header_name], size=11)
+                        cell.font = _get_font(_COLORES_CLASIF[header_name], bold=True, size=11)
                     continue
 
                 if es_sin_monto:
-                    # Fondo rosado muy claro con texto gris para filas sin monto
-                    cell.fill = PatternFill('solid', fgColor='F4CCFF')  # Violáceo muy claro
-                    cell.font = Font(color='7F7F7F', italic=True)
+                    cell.fill = _fill_sinmonto
+                    cell.font = _font_sinmonto
                 elif es_itf:
-                    cell.font = Font(color='7F7F7F', italic=True)
-                    # Mantener fondo de columna banco/conta si aplica
+                    cell.font = _font_itf
                     if nombre_hoja == 'Anexar1':
                         if 'Banco' in header_name:
-                            cell.fill = PatternFill('solid', fgColor='D9E1F2')
+                            cell.fill = _fill_banco
                         elif 'Conta' in header_name:
-                            cell.fill = PatternFill('solid', fgColor='E2EFDA')
+                            cell.fill = _fill_conta
                 elif es_sugerido and color_sug_grupo:
-                    # Fondo alternado del grupo sugerido sobre toda la fila
-                    cell.fill = PatternFill('solid', fgColor=color_sug_grupo)
-                    cell.font = Font(color='7F3F00', bold=True)  # Marrón oscuro negrita para destacar
+                    cell.fill = _get_fill(color_sug_grupo)
+                    cell.font = _font_sugerido
                 elif es_rojo:
-                    cell.font = Font(color='FF0000')
-                    # Fondo de columna banco/conta si aplica
+                    cell.font = _font_rojo
                     if nombre_hoja == 'Anexar1':
                         if 'Banco' in header_name:
-                            cell.fill = PatternFill('solid', fgColor='D9E1F2')
+                            cell.fill = _fill_banco
                         elif 'Conta' in header_name:
-                            cell.fill = PatternFill('solid', fgColor='E2EFDA')
+                            cell.fill = _fill_conta
                 else:
-                    # Fondo distintivo para columnas Banco/Conta en filas normales
                     if nombre_hoja == 'Anexar1':
                         if 'Banco' in header_name:
-                            cell.fill = PatternFill('solid', fgColor='D9E1F2')
+                            cell.fill = _fill_banco
                         elif 'Conta' in header_name:
-                            cell.fill = PatternFill('solid', fgColor='E2EFDA')
+                            cell.fill = _fill_conta
 
-                # Fechas en formato legible
                 if isinstance(cell.value, datetime):
-                    cell.number_format = 'DD/MM/YYYY'
+                    cell.number_format = _num_fmt_date
 
-                # Negrita y color de fuente distintivo para columnas de monto
                 if header_name in ('Monto-Banco', 'Monto-Conta') and nombre_hoja == 'Anexar1':
-                    existing_font = cell.font
-                    monto_color = '0033CC'  # Azul fuerte para ambos montos
-                    cell.font = Font(
-                        bold=True,
-                        color=monto_color,
-                        italic=existing_font.italic,
-                        size=11,
-                    )
-                    cell.number_format = '#,##0.00'
+                    cell.font = _font_monto
+                    cell.number_format = _num_fmt_amount
 
         # Combinar ÚNICAMENTE celdas de la columna 'Conciliar' para grupos sugeridos
         if (nombre_hoja == 'Anexar1' and col_op2_idx is not None
                 and col_conc_idx is not None and col_anot_idx is not None):
-            group_rows = {}
+            group_rows: dict[str, list[int]] = {}
             for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
                 op2_val = row[col_op2_idx].value
                 anot_val = row[col_anot_idx].value
@@ -2102,11 +2200,15 @@ def _aplicar_formato(ruta: Path) -> None:
                         end_row=rows[-1],  end_column=col_conc_idx + 1
                     )
 
-        # Autoajuste de columnas
+        # Autoajuste de columnas — muestrear hasta 200 filas para velocidad
+        _MAX_SAMPLE = 200
         for col in ws.columns:
             max_len = 0
             col_letter = get_column_letter(col[0].column)
-            for cell in col:
+            cells = list(col)
+            # Tomar cabecera + muestra del resto
+            sample = [cells[0]] + cells[1:_MAX_SAMPLE + 1]
+            for cell in sample:
                 try:
                     largo = len(str(cell.value)) if cell.value is not None else 0
                     if largo > max_len:
