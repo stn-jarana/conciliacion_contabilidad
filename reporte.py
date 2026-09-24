@@ -15,7 +15,11 @@ Uso:
 """
 
 import re
+<<<<<<< Updated upstream
 import time
+=======
+import unicodedata
+>>>>>>> Stashed changes
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
@@ -1848,14 +1852,50 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
             return True
         return False
 
+    def _es_comision_bcp_desc(desc: str) -> bool:
+        """Detecta comisiones/mantenimiento en el campo Detalle del extracto BCP.
+
+        Patrones reconocidos (insensible a mayúsculas/tildes):
+        - COM, COM., COMI, COMIS, COMISION, COMISIÓN, y cualquier variante que
+          empiece por COM seguida de letras típicas de 'comisión'.
+        - MANT, MANT., MANTENIMIENTO, MANTENIMIENTO. y similares.
+        """
+        if not desc:
+            return False
+        d_upper = desc.upper().strip()
+        # Eliminar tildes para comparación robusta
+        d_norm = ''.join(
+            c for c in unicodedata.normalize('NFD', d_upper)
+            if unicodedata.category(c) != 'Mn'
+        )
+        # Patrón: palabra que empiece con COM (comisión, comi, com., com, etc.)
+        # o con MANT (mantenimiento, mant., mant, etc.)
+        # Se usa \b o fin de palabra/puntuación para evitar falsos positivos
+        if re.search(r'\bCOM(?:IS(?:ION)?|I|\.?)?\b', d_norm):
+            return True
+        if re.search(r'\bMANT(?:ENIMIENTO)?\b', d_norm):
+            return True
+        return False
+
+    # Resolver clave del banco una sola vez (usada en _marcar_comisiones)
+    try:
+        from bancos import clave_banco as _clave_banco
+        _banco_clave = _clave_banco(banco) if banco else ''
+    except Exception:
+        _banco_clave = ''
+
     def _marcar_comisiones(row):
         # Si la fila ya es ITF, no marcar también como comisión
         if _marcar_itf(row) == 'X':
             return ''
         desc = str(row.get('Banco - Descripción', '') or '')
-        # Regla explícita por descripción de banco
-        if _es_comision_scotiabank_desc(desc):
-            return 'X'
+        # Regla explícita por descripción de banco, diferenciada por banco
+        if _banco_clave == 'BCP':
+            if _es_comision_bcp_desc(desc):
+                return 'X'
+        else:
+            if _es_comision_scotiabank_desc(desc):
+                return 'X'
 
         dif = row.get('DIF COMISON')
         try:

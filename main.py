@@ -532,34 +532,83 @@ def pedir_archivo_banco(banco: str) -> Path:
             return path
 
 
-def _cargar_banco_scotiabank(ruta_banco: Path) -> tuple[pd.DataFrame, float | None]:
+def _extraer_cuenta_bcp(file_bank: Path, config: dict) -> str:
+    """Lee las filas de cabecera del Excel BCP (antes del skip_bank) y extrae
+    el número de cuenta corriente.
+
+    El extracto BCP incluye en sus primeras filas una celda con el formato
+    'N° Cuenta: 194-XXXXXXX-X-XX' o simplemente el número desnudo (p.ej.
+    '194-1162203-0-23'). La función busca ambos patrones.
+    Devuelve la cuenta como string o '' si no la encuentra.
+    """
+    import re as _re_bcp
+    try:
+        xls = pd.ExcelFile(file_bank)
+        sheet_bank = config.get("sheet_bank", "")
+        if isinstance(sheet_bank, (tuple, list)):
+            hoja = next((h for h in sheet_bank if h in xls.sheet_names), None)
+        else:
+            hoja = sheet_bank if sheet_bank in xls.sheet_names else None
+        if hoja is None and xls.sheet_names:
+            hoja = xls.sheet_names[0]
+        if hoja is None:
+            return ''
+
+        n_skip = config.get("skip_bank", 4)
+        # Leer solo las filas de cabecera sin skip
+        cabecera_df = pd.read_excel(file_bank, sheet_name=hoja, header=None, nrows=n_skip)
+
+        # Patrón de número de cuenta BCP: dígitos separados por guiones, ej. 194-1162203-0-23
+        _pat_cuenta = _re_bcp.compile(r'\b(\d{3}-\d{5,}-\d-\d{2})\b')
+
+        for _, fila in cabecera_df.iterrows():
+            for celda in fila:
+                texto = str(celda).strip() if celda is not None else ''
+                if not texto or texto.lower() in ('nan', 'none'):
+                    continue
+                m = _pat_cuenta.search(texto)
+                if m:
+                    return m.group(1)
+                # También buscar después de etiquetas como "N° Cuenta:", "Cuenta:", "Cta:"
+                m2 = _re_bcp.search(
+                    r'(?:N[°º]?\s*Cuenta|Cuenta|Cta)[^:]*:\s*([\d\-]+)',
+                    texto, _re_bcp.IGNORECASE
+                )
+                if m2:
+                    return m2.group(1).strip()
+    except Exception:
+        pass
+    return ''
+
+
+def _cargar_banco_scotiabank(ruta_banco: Path) -> tuple[pd.DataFrame, float | None, str]:
     """
     Carga el estado de cuenta de Scotiabank desde PDF (o Excel como fallback).
-    Devuelve (bank_df, saldo_final). bank_df tiene las columnas internas del motor.
+    Devuelve (bank_df, saldo_final, cuenta). bank_df tiene las columnas internas del motor.
     """
     if ruta_banco.suffix.lower() == '.pdf':
         from SCOTIABANK.extract_data_pdf import leer_pdf_scotiabank
         resultado = leer_pdf_scotiabank(ruta_banco)
-        return resultado['movimientos'], resultado['saldo_final']
+        return resultado['movimientos'], resultado['saldo_final'], resultado.get('cuenta', '')
     else:
         from bancos import leer_estado_bancario
         df, _ = leer_estado_bancario(ruta_banco, 'SCOTIABANK')
-        return df, None
+        return df, None, ''
 
 
-def _cargar_banco_bn(ruta_banco: Path) -> tuple[pd.DataFrame, float | None]:
+def _cargar_banco_bn(ruta_banco: Path) -> tuple[pd.DataFrame, float | None, str]:
     """
     Carga el estado de cuenta de Banco de la Nación desde PDF (o Excel como fallback).
-    Devuelve (bank_df, saldo_final). bank_df tiene las columnas internas del motor.
+    Devuelve (bank_df, saldo_final, cuenta). bank_df tiene las columnas internas del motor.
     """
     if ruta_banco.suffix.lower() == '.pdf':
         from BN.extract_data_bn import leer_pdf_bn
         resultado = leer_pdf_bn(ruta_banco)
-        return resultado['movimientos'], resultado['saldo_final']
+        return resultado['movimientos'], resultado['saldo_final'], resultado.get('cuenta', '')
     else:
         from bancos import leer_estado_bancario
         df, _ = leer_estado_bancario(ruta_banco, 'BN')
-        return df, None
+        return df, None, ''
 
 
 
@@ -619,14 +668,15 @@ def flujo_reporte_inicial(config: dict) -> None:
 
     # ── Carga y sanitización banco ────────────────────────────────────
     if banco_config == 'SCOTIABANK':
-        bank, saldo_banco_final = _cargar_banco_scotiabank(file_bank)
+        bank, saldo_banco_final, cuenta_banco = _cargar_banco_scotiabank(file_bank)
         banco_nombre = 'Scotia'
     elif banco_config == 'BN':
-        bank, saldo_banco_final = _cargar_banco_bn(file_bank)
+        bank, saldo_banco_final, cuenta_banco = _cargar_banco_bn(file_bank)
         banco_nombre = 'BN'
     else:
         bank = _cargar_banco_bcp(file_bank, config)
         saldo_banco_final = None
+        cuenta_banco = _extraer_cuenta_bcp(file_bank, config)
         banco_nombre = _extraer_nombre_banco(file_conta, config.get('skip_conta', 11))
         if banco_nombre in ('', 'BANCO'):
             banco_nombre = 'BCP'
@@ -845,8 +895,9 @@ def flujo_reporte_inicial(config: dict) -> None:
         moneda=config['nombre'],
         mes_anio=mes_anio,
     )
-    # Obtener número de cuenta según banco seleccionado
-    cuenta_num = config.get('cuentas', {}).get(banco_config, '')
+    # Número de cuenta: se obtiene directamente del extracto bancario.
+    # Como fallback se consulta la configuración estática (EMPRESAS) para compatibilidad.
+    cuenta_num = cuenta_banco or config.get('cuentas', {}).get(banco_config, '')
     generar_reporte_inicial(
         bank,
         conta,
