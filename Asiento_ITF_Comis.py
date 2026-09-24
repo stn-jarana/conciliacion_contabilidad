@@ -1,0 +1,727 @@
+"""Genera asientos de ITF y comisiones desde una conciliación final.
+
+El archivo fuente debe contener una hoja ``ITF Y COM`` (también se aceptan
+variantes como ``ITF y Comisiones``) con las secciones de comisiones e ITF.
+El resultado es una copia de la plantilla Contanet, conservando sus macros,
+formatos y valores por defecto. Los asientos se escriben en la hoja visible
+``CONTABILIDAD``; la hoja técnica ``ImportCONTABILIDAD`` no se modifica.
+
+El tipo de cambio no se adivina: debe ser el *TC Venta* consultado en
+Contanet para el último día de cada mes informado. Puede entregarse como un
+valor único para un único período, un diccionario por fecha de cierre, o una
+función que realice la consulta autenticada de Contanet.
+
+Ejemplo de ejecución (un solo período)::
+
+    python Asiento_ITF_Comis.py CBF_STN_BCP_Dolares_JULIO_2026.xlsx \
+        "Plantilla comisiones Bcp Dolares.xlsm" \
+        --banco BCP --moneda ME --tc-venta 3.415 --salida Asiento_ITF.xlsm
+
+Para más de un período, se debe indicar un TC Venta por cada cierre mensual::
+
+    --tc-venta 2026-06-30=3.415 --tc-venta 2026-07-31=3.400
+"""
+
+from __future__ import annotations
+
+import argparse
+from calendar import monthrange
+from collections.abc import Callable, Iterable, Mapping
+from copy import copy
+from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from pathlib import Path
+import re
+import unicodedata
+from typing import Any
+
+from openpyxl import load_workbook
+from openpyxl.cell.cell import Cell
+from openpyxl.worksheet.worksheet import Worksheet
+
+
+# La cuenta de empresa para ITF es distinta de la cuenta de gasto de comisión.
+# Se mantienen las claves históricas ``empresa-ITF`` para no perder las cuentas
+# que ya estaban configuradas en este proyecto.
+CUENTAS: dict[tuple[str, str], dict[str, str]] = {
+    ("BCP", "MN"): {
+        "empresa": "97.7.9.2003",
+        "empresa-ITF": "94.4.1.2001",
+        "banco": "10.4.1.1002",
+    },
+    ("BCP", "ME"): {
+        "empresa": "97.7.9.2003",
+        "empresa-ITF": "94.4.1.2001",
+        "banco": "10.4.1.2001",
+    },
+    ("SCOTIA", "MN"): {
+        "empresa": "",
+        "empresa-ITF": "",
+        "banco": "",
+    },
+    ("SCOTIA", "ME"): {
+        "empresa": "97.7.9.2003",
+        "empresa-ITF": "94.4.1.2001",
+        "banco": "10.4.1.2002",
+    },
+    ("BCP MIAMI", "ME"): {
+        "empresa": "97.7.9.1001",
+        "empresa-ITF": "10.4.1.2004",
+        "banco": "10.4.1.2004",
+    },
+}
+
+# La plantilla tiene además una hoja técnica oculta llamada
+# ``ImportCONTABILIDAD``. La hoja que usa el usuario para crear el asiento es
+# ``CONTABILIDAD`` y por eso es el único destino del generador.
+NOMBRE_HOJA_DESTINO = "CONTABILIDAD"
+NOMBRES_HOJA_FUENTE = ("itf y com", "itf y comisiones", "itf comisiones")
+CENTAVOS = Decimal("0.01")
+
+
+class ErrorAsientoITFComisiones(ValueError):
+    """Error de datos o configuración al generar el asiento."""
+
+
+class TipoCambioNoDisponibleError(ErrorAsientoITFComisiones):
+    """No se recibió el TC Venta de Contanet para un cierre mensual."""
+
+
+@dataclass(frozen=True)
+class MovimientoITFComision:
+    """Movimiento válido leído de la hoja ITF y Comisiones."""
+
+    fecha: date
+    descripcion: str
+    monto: Decimal
+    tipo: str  # ``COMISION`` o ``ITF``
+    fila_origen: int
+
+
+TipoCambioVenta = (
+    Decimal
+    | float
+    | int
+    | str
+    | Mapping[date | datetime | str, Decimal | float | int | str]
+    | Callable[[date], Decimal | float | int | str]
+)
+
+
+def _normalizar(texto: Any) -> str:
+    """Normaliza texto para comparar encabezados, bancos y nombres de hoja."""
+    valor = "" if texto is None else str(texto)
+    valor = "".join(
+        caracter
+        for caracter in unicodedata.normalize("NFD", valor)
+        if unicodedata.category(caracter) != "Mn"
+    )
+    return " ".join(valor.upper().replace("º", "O").replace("°", "O").split())
+
+
+def _normalizar_moneda(moneda: str) -> str:
+    valor = _normalizar(moneda)
+    if valor in {"MN", "PEN", "SOL", "SOLES", "SOLES (PEN)"} or "SOL" in valor:
+        return "MN"
+    if valor in {"ME", "USD", "DOLAR", "DOLARES", "DOLARES (USD)"} or "USD" in valor or "DOL" in valor:
+        return "ME"
+    raise ErrorAsientoITFComisiones(
+        f"Moneda no reconocida: {moneda!r}. Use MN/Soles o ME/Dólares."
+    )
+
+
+def _normalizar_banco(banco: str) -> str:
+    valor = _normalizar(banco)
+    if "MIAMI" in valor and "BCP" in valor:
+        return "BCP MIAMI"
+    if valor in {"SCOTIA", "SCOTIABANK"} or "SCOTIA" in valor:
+        return "SCOTIA"
+    if valor in {"BCP", "BANCO DE CREDITO"} or "CREDITO" in valor:
+        return "BCP"
+    return valor
+
+
+def _a_decimal(valor: Any, *, campo: str) -> Decimal:
+    """Convierte un importe o TC a Decimal, aceptando formatos ES y EN."""
+    if isinstance(valor, Decimal):
+        return valor
+    if isinstance(valor, bool) or valor is None:
+        raise ErrorAsientoITFComisiones(f"{campo} no es un número válido: {valor!r}.")
+    if isinstance(valor, (int, float)):
+        try:
+            return Decimal(str(valor))
+        except InvalidOperation as exc:
+            raise ErrorAsientoITFComisiones(
+                f"{campo} no es un número válido: {valor!r}."
+            ) from exc
+
+    texto = str(valor).strip()
+    if not texto:
+        raise ErrorAsientoITFComisiones(f"{campo} está vacío.")
+    negativo_por_parentesis = texto.startswith("(") and texto.endswith(")")
+    texto = texto.strip("()")
+    texto = re.sub(r"[^0-9,.-]", "", texto)
+
+    # Si hay ambos separadores, el último es el decimal. Un único punto se
+    # considera decimal: permite ingresar correctamente TC Venta como 3.415.
+    if "," in texto and "." in texto:
+        if texto.rfind(",") > texto.rfind("."):
+            texto = texto.replace(".", "").replace(",", ".")
+        else:
+            texto = texto.replace(",", "")
+    elif texto.count(",") == 1:
+        entero, decimal = texto.split(",")
+        texto = entero + decimal if len(decimal) == 3 else entero + "." + decimal
+    elif texto.count(".") > 1:
+        partes = texto.split(".")
+        texto = "".join(partes[:-1]) + "." + partes[-1]
+
+    try:
+        numero = Decimal(texto)
+    except InvalidOperation as exc:
+        raise ErrorAsientoITFComisiones(
+            f"{campo} no es un número válido: {valor!r}."
+        ) from exc
+    return -numero if negativo_por_parentesis and numero > 0 else numero
+
+
+def _a_fecha(valor: Any) -> date | None:
+    """Convierte fechas Excel, datetime y textos frecuentes a ``date``."""
+    if valor is None or (isinstance(valor, str) and not valor.strip()):
+        return None
+    if isinstance(valor, datetime):
+        return valor.date()
+    if isinstance(valor, date):
+        return valor
+    if isinstance(valor, str):
+        texto = valor.strip()
+        for formato in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d.%m.%Y"):
+            try:
+                return datetime.strptime(texto, formato).date()
+            except ValueError:
+                continue
+    return None
+
+
+def ultimo_dia_mes(fecha_movimiento: date) -> date:
+    """Devuelve el último día natural del mes de una operación."""
+    return date(
+        fecha_movimiento.year,
+        fecha_movimiento.month,
+        monthrange(fecha_movimiento.year, fecha_movimiento.month)[1],
+    )
+
+
+def _encabezado_equivale(valor: Any, *opciones: str) -> bool:
+    normalizado = _normalizar(valor)
+    return normalizado in {_normalizar(opcion) for opcion in opciones}
+
+
+def _buscar_hoja_fuente(libro) -> Worksheet:
+    for hoja in libro.worksheets:
+        if _normalizar(hoja.title).lower() in NOMBRES_HOJA_FUENTE:
+            return hoja
+    for hoja in libro.worksheets:
+        nombre = _normalizar(hoja.title)
+        if "ITF" in nombre and ("COM" in nombre or "COMISION" in nombre):
+            return hoja
+    raise ErrorAsientoITFComisiones(
+        "No se encontró la hoja 'ITF Y COM' (o 'ITF y Comisiones') "
+        "en la conciliación final."
+    )
+
+
+def _tipo_seccion(valor: Any) -> str | None:
+    texto = _normalizar(valor)
+    if not texto or "TOTAL" in texto:
+        return None
+    if "ITF" in texto:
+        return "ITF"
+    if "COMIS" in texto:
+        return "COMISION"
+    return None
+
+
+def _indice_encabezados_fuente(fila: Iterable[Cell]) -> dict[str, int] | None:
+    """Identifica los encabezados Fecha, Descripción y Monto de una sección."""
+    resultado: dict[str, int] = {}
+    for celda in fila:
+        valor = _normalizar(celda.value)
+        if valor in {"FECHA", "FECHA MOVIMIENTO"}:
+            resultado["fecha"] = celda.column
+        elif valor in {"DESCRIPCION", "GLOSA", "DETALLE"}:
+            resultado["descripcion"] = celda.column
+        elif valor in {"MONTO", "IMPORTE"}:
+            resultado["monto"] = celda.column
+    return resultado if {"fecha", "descripcion", "monto"} <= resultado.keys() else None
+
+
+def leer_movimientos_itf_comisiones(ruta_conciliacion_final: str | Path) -> list[MovimientoITFComision]:
+    """Lee los movimientos de las secciones ITF y comisiones del reporte final."""
+    ruta = Path(ruta_conciliacion_final).expanduser().resolve()
+    if not ruta.is_file():
+        raise FileNotFoundError(f"No existe la conciliación final: {ruta}")
+
+    libro = load_workbook(ruta, read_only=True, data_only=True)
+    try:
+        hoja = _buscar_hoja_fuente(libro)
+        seccion: str | None = None
+        columnas: dict[str, int] | None = None
+        movimientos: list[MovimientoITFComision] = []
+
+        for numero_fila, fila in enumerate(hoja.iter_rows(), start=1):
+            primer_valor = fila[0].value if fila else None
+            nueva_seccion = _tipo_seccion(primer_valor)
+            if nueva_seccion is not None:
+                seccion = nueva_seccion
+                columnas = None
+                continue
+
+            encabezados = _indice_encabezados_fuente(fila)
+            if encabezados is not None:
+                columnas = encabezados
+                continue
+
+            if seccion is None or columnas is None:
+                continue
+
+            fecha = _a_fecha(fila[columnas["fecha"] - 1].value)
+            if fecha is None:
+                continue  # Totales, espacios u otros textos del reporte.
+            descripcion = str(fila[columnas["descripcion"] - 1].value or "").strip()
+            if not descripcion:
+                raise ErrorAsientoITFComisiones(
+                    f"La fila {numero_fila} de '{hoja.title}' no tiene descripción."
+                )
+            monto = _a_decimal(
+                fila[columnas["monto"] - 1].value,
+                campo=f"Monto de la fila {numero_fila} de '{hoja.title}'",
+            )
+            if monto == 0:
+                continue
+            movimientos.append(
+                MovimientoITFComision(
+                    fecha=fecha,
+                    descripcion=descripcion,
+                    monto=monto,
+                    tipo=seccion,
+                    fila_origen=numero_fila,
+                )
+            )
+    finally:
+        libro.close()
+
+    if not movimientos:
+        raise ErrorAsientoITFComisiones(
+            "La hoja ITF y Comisiones no contiene movimientos con fecha y monto."
+        )
+    return movimientos
+
+
+def _buscar_fila_encabezados_destino(hoja: Worksheet) -> tuple[int, dict[str, int]]:
+    """Ubica los encabezados requeridos en la plantilla Contanet."""
+    requeridos: dict[str, tuple[str, ...]] = {
+        "correlativo": ("Correlativo",),
+        "relacionado": ("Relacionado",),
+        "ejercicio": ("Ejercicio",),
+        "periodo": ("Periodo", "Período"),
+        "nro_cuenta": ("Numero Cuenta", "Número Cuenta", "Nro Cuenta", "N° Cuenta"),
+        "glosa": ("Glosa",),
+        "fecha_emision": ("Fecha Emision Doc", "Fecha Emisión Doc"),
+        "fecha_vencimiento": ("Fecha Vencimiento Doc", "Fecha Vencimiento Doc."),
+        "fecha_movimiento": ("Fecha Movimiento",),
+        "fecha_cbr": ("Fecha Cbr", "Fecha Cbr."),
+        "fecha_registro": ("Fecha Registro",),
+        "monto_debe": ("Monto Debe",),
+        "monto_haber": ("Monto Haber",),
+        "monto_debe_me": ("Monto Debe ME",),
+        "monto_haber_me": ("Monto Haber ME",),
+        "cambio_moneda": ("Cambio Moneda",),
+    }
+
+    for numero_fila in range(1, min(hoja.max_row, 30) + 1):
+        hallados: dict[str, int] = {}
+        for numero_columna in range(1, hoja.max_column + 1):
+            valor = hoja.cell(numero_fila, numero_columna).value
+            for clave, alias in requeridos.items():
+                if clave not in hallados and _encabezado_equivale(valor, *alias):
+                    hallados[clave] = numero_columna
+                    break
+        if set(requeridos) <= set(hallados):
+            return numero_fila, hallados
+
+    faltantes = ", ".join(requeridos)
+    raise ErrorAsientoITFComisiones(
+        "La plantilla no contiene todos los encabezados requeridos: " + faltantes
+    )
+
+
+def _copiar_fila_modelo(hoja: Worksheet, fila_modelo: int, fila_destino: int) -> None:
+    """Copia estilo, comentarios, vínculos y valores por defecto de la plantilla."""
+    hoja.row_dimensions[fila_destino].height = hoja.row_dimensions[fila_modelo].height
+    hoja.row_dimensions[fila_destino].hidden = hoja.row_dimensions[fila_modelo].hidden
+    for columna in range(1, hoja.max_column + 1):
+        origen = hoja.cell(fila_modelo, columna)
+        destino = hoja.cell(fila_destino, columna)
+        destino.value = origen.value
+        if origen.has_style:
+            destino._style = copy(origen._style)
+        if origen.alignment:
+            destino.alignment = copy(origen.alignment)
+        if origen.protection:
+            destino.protection = copy(origen.protection)
+        if origen.comment:
+            destino.comment = copy(origen.comment)
+        if origen.hyperlink:
+            destino._hyperlink = copy(origen.hyperlink)
+
+
+def _limpiar_importacion(hoja: Worksheet, primera_fila_a_eliminar: int) -> None:
+    """Elimina las filas de ejemplo posteriores a la fila modelo."""
+    if hoja.max_row >= primera_fila_a_eliminar:
+        hoja.delete_rows(
+            primera_fila_a_eliminar,
+            hoja.max_row - primera_fila_a_eliminar + 1,
+        )
+
+
+def _cuentas_para(
+    banco: str,
+    moneda: str,
+    cuentas_personalizadas: Mapping[tuple[str, str], Mapping[str, str]] | None = None,
+) -> Mapping[str, str]:
+    banco_normalizado = _normalizar_banco(banco)
+    moneda_normalizada = _normalizar_moneda(moneda)
+    catalogo = cuentas_personalizadas or CUENTAS
+    cuentas = catalogo.get((banco_normalizado, moneda_normalizada))
+    if cuentas is None:
+        raise ErrorAsientoITFComisiones(
+            f"No hay cuentas configuradas para banco={banco_normalizado!r}, "
+            f"moneda={moneda_normalizada!r}."
+        )
+
+    empresa_itf = cuentas.get("empresa_itf") or cuentas.get("empresa-ITF")
+    faltantes = [
+        nombre
+        for nombre, valor in {
+            "empresa": cuentas.get("empresa"),
+            "empresa_itf": empresa_itf,
+            "banco": cuentas.get("banco"),
+        }.items()
+        if not str(valor or "").strip()
+    ]
+    if faltantes:
+        raise ErrorAsientoITFComisiones(
+            f"Faltan cuentas para {banco_normalizado} {moneda_normalizada}: "
+            + ", ".join(faltantes)
+            + ". Complete CUENTAS o use cuentas_personalizadas."
+        )
+    return {
+        "empresa": str(cuentas["empresa"]),
+        "empresa_itf": str(empresa_itf),
+        "banco": str(cuentas["banco"]),
+    }
+
+
+def _resolver_tc_venta(tipo_cambio_venta: TipoCambioVenta, fecha_cierre: date) -> Decimal:
+    """Obtiene y valida el TC Venta para la fecha de cierre solicitada."""
+    if callable(tipo_cambio_venta):
+        valor = tipo_cambio_venta(fecha_cierre)
+    elif isinstance(tipo_cambio_venta, Mapping):
+        candidatos: tuple[Any, ...] = (
+            fecha_cierre,
+            datetime.combine(fecha_cierre, datetime.min.time()),
+            fecha_cierre.isoformat(),
+            fecha_cierre.strftime("%d/%m/%Y"),
+        )
+        valor = next(
+            (tipo_cambio_venta[candidato] for candidato in candidatos if candidato in tipo_cambio_venta),
+            None,
+        )
+        if valor is None:
+            raise TipoCambioNoDisponibleError(
+                "Falta el TC Venta de Contanet para el "
+                f"{fecha_cierre.strftime('%d/%m/%Y')}."
+            )
+    else:
+        valor = tipo_cambio_venta
+
+    tc_venta = _a_decimal(
+        valor,
+        campo=f"TC Venta de Contanet para {fecha_cierre.strftime('%d/%m/%Y')}",
+    )
+    if tc_venta <= 0:
+        raise TipoCambioNoDisponibleError(
+            f"El TC Venta de Contanet debe ser mayor que cero ({fecha_cierre:%d/%m/%Y})."
+        )
+    return tc_venta
+
+
+def _importe_redondeado(valor: Decimal) -> Decimal:
+    return valor.quantize(CENTAVOS, rounding=ROUND_HALF_UP)
+
+
+def _montos_asiento(
+    monto: Decimal,
+    moneda: str,
+    tc_venta: Decimal,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """Devuelve importes de empresa (superior) y banco (inferior), equilibrados."""
+    importe = abs(monto)
+    monto_mn = (
+        _importe_redondeado(importe)
+        if moneda == "MN"
+        else _importe_redondeado(importe * tc_venta)
+    )
+    monto_me = (
+        _importe_redondeado(importe / tc_venta)
+        if moneda == "MN"
+        else _importe_redondeado(importe)
+    )
+    banco = {
+        "monto_debe": Decimal("0"),
+        "monto_haber": Decimal("0"),
+        "monto_debe_me": Decimal("0"),
+        "monto_haber_me": Decimal("0"),
+    }
+    empresa = banco.copy()
+
+    # El banco define el sentido: egreso (negativo) al Haber e ingreso
+    # (positivo) al Debe. La empresa registra el sentido opuesto.
+    lado_banco = "haber" if monto < 0 else "debe"
+    lado_empresa = "debe" if monto < 0 else "haber"
+    banco[f"monto_{lado_banco}"] = monto_mn
+    banco[f"monto_{lado_banco}_me"] = monto_me
+    empresa[f"monto_{lado_empresa}"] = monto_mn
+    empresa[f"monto_{lado_empresa}_me"] = monto_me
+    return empresa, banco
+
+
+def _escribir_fila(
+    hoja: Worksheet,
+    fila: int,
+    columnas: Mapping[str, int],
+    *,
+    correlativo: int,
+    relacionado: int,
+    fecha: date,
+    cuenta: str,
+    glosa: str,
+    montos: Mapping[str, Decimal],
+    tc_venta: Decimal,
+) -> None:
+    """Escribe únicamente los campos variables definidos por la regla contable."""
+    valores: dict[str, Any] = {
+        "correlativo": correlativo,
+        "relacionado": relacionado,
+        "ejercicio": fecha.year,
+        "periodo": f"{fecha.month:02d}",
+        "nro_cuenta": cuenta,
+        "glosa": glosa,
+        "fecha_emision": fecha,
+        "fecha_vencimiento": fecha,
+        "fecha_movimiento": fecha,
+        "fecha_cbr": fecha,
+        "fecha_registro": fecha,
+        "monto_debe": montos["monto_debe"],
+        "monto_haber": montos["monto_haber"],
+        "monto_debe_me": montos["monto_debe_me"],
+        "monto_haber_me": montos["monto_haber_me"],
+        "cambio_moneda": tc_venta,
+    }
+    for campo, valor in valores.items():
+        hoja.cell(fila, columnas[campo]).value = valor
+
+
+def generar_asientos_itf_comisiones(
+    ruta_conciliacion_final: str | Path,
+    ruta_plantilla: str | Path,
+    *,
+    banco: str,
+    moneda: str,
+    tipo_cambio_venta: TipoCambioVenta,
+    ruta_salida: str | Path | None = None,
+    cuentas_personalizadas: Mapping[tuple[str, str], Mapping[str, str]] | None = None,
+) -> Path:
+    """Genera y guarda la plantilla de importación de ITF y comisiones.
+
+    Cada movimiento crea dos filas consecutivas: empresa (correlativo 1) y
+    banco (correlativo 2). Ambas comparten el número de ``Relacionado`` del
+    asiento. Los cinco campos de fecha reciben el último día del mes de la
+    operación; los montos se generan en MN y ME usando el TC Venta del cierre.
+    """
+    ruta_final = Path(ruta_conciliacion_final).expanduser().resolve()
+    plantilla = Path(ruta_plantilla).expanduser().resolve()
+    if not plantilla.is_file():
+        raise FileNotFoundError(f"No existe la plantilla: {plantilla}")
+
+    movimientos = leer_movimientos_itf_comisiones(ruta_final)
+    moneda_normalizada = _normalizar_moneda(moneda)
+    cuentas = _cuentas_para(banco, moneda_normalizada, cuentas_personalizadas)
+
+    cierres = {ultimo_dia_mes(movimiento.fecha) for movimiento in movimientos}
+    if len(cierres) > 1 and not callable(tipo_cambio_venta) and not isinstance(tipo_cambio_venta, Mapping):
+        raise TipoCambioNoDisponibleError(
+            "La conciliación contiene más de un mes. Indique un TC Venta de "
+            "Contanet por cada cierre mensual mediante un diccionario o función."
+        )
+    tipos_cambio = {
+        cierre: _resolver_tc_venta(tipo_cambio_venta, cierre)
+        for cierre in cierres
+    }
+
+    if ruta_salida is None:
+        ruta_salida = ruta_final.with_name(
+            f"Asiento_ITF_Comis_{ruta_final.stem}{plantilla.suffix}"
+        )
+    salida = Path(ruta_salida).expanduser().resolve()
+    if plantilla.suffix.lower() == ".xlsm" and salida.suffix.lower() != ".xlsm":
+        raise ErrorAsientoITFComisiones(
+            "La plantilla tiene macros (.xlsm); la salida también debe terminar en .xlsm."
+        )
+    if salida in {plantilla, ruta_final}:
+        raise ErrorAsientoITFComisiones(
+            "La salida debe ser un archivo distinto de la plantilla y de la conciliación final."
+        )
+    salida.parent.mkdir(parents=True, exist_ok=True)
+
+    libro = load_workbook(plantilla, keep_vba=plantilla.suffix.lower() == ".xlsm")
+    try:
+        if NOMBRE_HOJA_DESTINO not in libro.sheetnames:
+            raise ErrorAsientoITFComisiones(
+                f"La plantilla no tiene la hoja '{NOMBRE_HOJA_DESTINO}'."
+            )
+        hoja = libro[NOMBRE_HOJA_DESTINO]
+        fila_encabezado, columnas = _buscar_fila_encabezados_destino(hoja)
+        fila_modelo = fila_encabezado + 1
+
+        # Se deja inicialmente la primera fila de datos como modelo y se
+        # eliminan las filas de ejemplo restantes. Antes de escribir en ella,
+        # se replica su contenido/formato para todos los asientos necesarios.
+        _limpiar_importacion(hoja, fila_modelo + 1)
+        cantidad_filas = len(movimientos) * 2
+        for fila in range(fila_modelo + 1, fila_modelo + cantidad_filas):
+            _copiar_fila_modelo(hoja, fila_modelo, fila)
+
+        fila_destino = fila_modelo
+        for relacionado, movimiento in enumerate(movimientos, start=1):
+            fecha_cierre = ultimo_dia_mes(movimiento.fecha)
+            tc_venta = tipos_cambio[fecha_cierre]
+            cuenta_empresa = (
+                cuentas["empresa_itf"] if movimiento.tipo == "ITF" else cuentas["empresa"]
+            )
+            montos_empresa, montos_banco = _montos_asiento(
+                movimiento.monto, moneda_normalizada, tc_venta
+            )
+
+            _escribir_fila(
+                hoja,
+                fila_destino,
+                columnas,
+                correlativo=1,
+                relacionado=relacionado,
+                fecha=fecha_cierre,
+                cuenta=cuenta_empresa,
+                glosa=movimiento.descripcion,
+                montos=montos_empresa,
+                tc_venta=tc_venta,
+            )
+            fila_destino += 1
+
+            _escribir_fila(
+                hoja,
+                fila_destino,
+                columnas,
+                correlativo=2,
+                relacionado=relacionado,
+                fecha=fecha_cierre,
+                cuenta=cuentas["banco"],
+                glosa=movimiento.descripcion,
+                montos=montos_banco,
+                tc_venta=tc_venta,
+            )
+            fila_destino += 1
+
+        # CONTABILIDAD es la hoja operativa de la plantilla; se deja visible y
+        # activa para que el usuario pueda verificar el asiento antes de subirlo.
+        hoja.sheet_state = "visible"
+        libro.active = libro.index(hoja)
+        libro.save(salida)
+    finally:
+        libro.close()
+
+    return salida
+
+
+def _parsear_tipos_cambio(argumentos: list[str]) -> TipoCambioVenta:
+    """Convierte los argumentos CLI a un TC único o un mapa por fecha."""
+    if not argumentos:
+        raise TipoCambioNoDisponibleError(
+            "Indique el TC Venta consultado en Contanet con --tc-venta."
+        )
+    if len(argumentos) == 1 and "=" not in argumentos[0]:
+        return _a_decimal(argumentos[0], campo="TC Venta de Contanet")
+
+    tipos_cambio: dict[date, Decimal] = {}
+    for argumento in argumentos:
+        if "=" not in argumento:
+            raise TipoCambioNoDisponibleError(
+                "Para varios meses use --tc-venta AAAA-MM-DD=VALOR por cada cierre."
+            )
+        fecha_texto, valor = argumento.split("=", maxsplit=1)
+        fecha_cierre = _a_fecha(fecha_texto)
+        if fecha_cierre is None:
+            raise TipoCambioNoDisponibleError(
+                f"Fecha de TC Venta inválida: {fecha_texto!r}. Use AAAA-MM-DD."
+            )
+        tipos_cambio[fecha_cierre] = _a_decimal(
+            valor, campo=f"TC Venta de Contanet para {fecha_texto}"
+        )
+    return tipos_cambio
+
+
+def _crear_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Genera el asiento Contanet de ITF y comisiones desde una conciliación final."
+    )
+    parser.add_argument("conciliacion_final", help="Archivo CBF con la hoja ITF Y COM.")
+    parser.add_argument("plantilla", help="Plantilla Contanet .xlsx o .xlsm.")
+    parser.add_argument("--banco", required=True, help="Ej.: BCP, Scotia o BCP Miami.")
+    parser.add_argument("--moneda", required=True, help="MN/Soles o ME/Dólares.")
+    parser.add_argument(
+        "--tc-venta",
+        required=True,
+        action="append",
+        metavar="VALOR|FECHA=VALOR",
+        help=(
+            "TC Venta obtenido de Contanet. Use un valor para un período, o "
+            "AAAA-MM-DD=valor por cada cierre mensual."
+        ),
+    )
+    parser.add_argument("--salida", help="Ruta del .xlsx/.xlsm a generar.")
+    return parser
+
+
+def main() -> int:
+    """Punto de entrada de consola; imprime la ruta lista para cargar."""
+    argumentos = _crear_parser().parse_args()
+    try:
+        salida = generar_asientos_itf_comisiones(
+            argumentos.conciliacion_final,
+            argumentos.plantilla,
+            banco=argumentos.banco,
+            moneda=argumentos.moneda,
+            tipo_cambio_venta=_parsear_tipos_cambio(argumentos.tc_venta),
+            ruta_salida=argumentos.salida,
+        )
+    except (ErrorAsientoITFComisiones, FileNotFoundError, PermissionError) as exc:
+        print(f"Error: {exc}")
+        return 1
+
+    print(f"Archivo creado y cerrado: {salida}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

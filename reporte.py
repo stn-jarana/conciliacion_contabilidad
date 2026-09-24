@@ -15,11 +15,8 @@ Uso:
 """
 
 import re
-<<<<<<< Updated upstream
 import time
-=======
 import unicodedata
->>>>>>> Stashed changes
 import pandas as pd
 from pathlib import Path
 from datetime import datetime

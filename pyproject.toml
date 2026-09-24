@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "bs4>=0.0.2",
     "ipython>=9.17.1",
     "matplotlib>=3.11.2",
     "openpyxl>=3.1.5",
@@ -13,5 +14,6 @@ dependencies = [
     "pymupdf4llm>=1.28.2",
     "pytest>=9.1.1",
     "reportlab>=5.0.0",
+    "requests>=2.34.2",
     "xlrd>=2.0.2",
 ]
