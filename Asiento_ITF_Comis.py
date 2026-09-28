@@ -73,9 +73,9 @@ CUENTAS: dict[tuple[str, str], dict[str, str]] = {
 }
 
 # La plantilla tiene además una hoja técnica oculta llamada
-# ``ImportCONTABILIDAD``. La hoja que usa el usuario para crear el asiento es
-# ``CONTABILIDAD`` y por eso es el único destino del generador.
+# ``ImportCONTABILIDAD`` que Contanet lee directamente durante la importación.
 NOMBRE_HOJA_DESTINO = "CONTABILIDAD"
+NOMBRE_HOJA_IMPORT = "ImportCONTABILIDAD"
 NOMBRES_HOJA_FUENTE = ("itf y com", "itf y comisiones", "itf comisiones")
 CENTAVOS = Decimal("0.01")
 
@@ -546,10 +546,11 @@ def generar_asientos_itf_comisiones(
 ) -> Path:
     """Genera y guarda la plantilla de importación de ITF y comisiones.
 
-    Cada movimiento crea dos filas consecutivas: empresa (correlativo 1) y
-    banco (correlativo 2). Ambas comparten el número de ``Relacionado`` del
+    Cada movimiento crea dos filas consecutivas (empresa y banco) con correlativo
+    secuencial (1, 2, 3...). Ambas filas comparten el número de ``Relacionado`` del
     asiento. Los cinco campos de fecha reciben el último día del mes de la
     operación; los montos se generan en MN y ME usando el TC Venta del cierre.
+    Si la plantilla incluye ``ImportCONTABILIDAD``, se sincroniza automáticamente.
     """
     ruta_final = Path(ruta_conciliacion_final).expanduser().resolve()
     plantilla = Path(ruta_plantilla).expanduser().resolve()
@@ -605,6 +606,7 @@ def generar_asientos_itf_comisiones(
             _copiar_fila_modelo(hoja, fila_modelo, fila)
 
         fila_destino = fila_modelo
+        correlativo = 0
         for relacionado, movimiento in enumerate(movimientos, start=1):
             fecha_cierre = ultimo_dia_mes(movimiento.fecha)
             tc_venta = tipos_cambio[fecha_cierre]
@@ -615,11 +617,12 @@ def generar_asientos_itf_comisiones(
                 movimiento.monto, moneda_normalizada, tc_venta
             )
 
+            correlativo += 1
             _escribir_fila(
                 hoja,
                 fila_destino,
                 columnas,
-                correlativo=1,
+                correlativo=correlativo,
                 relacionado=relacionado,
                 fecha=fecha_cierre,
                 cuenta=cuenta_empresa,
@@ -629,11 +632,12 @@ def generar_asientos_itf_comisiones(
             )
             fila_destino += 1
 
+            correlativo += 1
             _escribir_fila(
                 hoja,
                 fila_destino,
                 columnas,
-                correlativo=2,
+                correlativo=correlativo,
                 relacionado=relacionado,
                 fecha=fecha_cierre,
                 cuenta=cuentas["banco"],
@@ -642,6 +646,19 @@ def generar_asientos_itf_comisiones(
                 tc_venta=tc_venta,
             )
             fila_destino += 1
+
+        # Si la plantilla contiene la hoja técnica ImportCONTABILIDAD (utilizada
+        # por Contanet para validar e importar), se sincroniza automáticamente
+        # para que el archivo quede listo sin depender de macros de guardado.
+        if NOMBRE_HOJA_IMPORT in libro.sheetnames:
+            hoja_import = libro[NOMBRE_HOJA_IMPORT]
+            _limpiar_importacion(hoja_import, 2)
+            for fila_src in range(fila_modelo, fila_destino):
+                fila_dst = fila_src - fila_modelo + 2
+                for col_dst in range(1, hoja.max_column - 3 + 1):
+                    valor_celda = hoja.cell(fila_src, col_dst + 3).value
+                    if valor_celda is not None:
+                        hoja_import.cell(fila_dst, col_dst).value = valor_celda
 
         # CONTABILIDAD es la hoja operativa de la plantilla; se deja visible y
         # activa para que el usuario pueda verificar el asiento antes de subirlo.
