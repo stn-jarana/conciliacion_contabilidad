@@ -910,6 +910,141 @@ def flujo_reporte_inicial(config: dict) -> None:
     )
 
 
+
+# ══════════════════════════════════════════════════════════
+# GENERACIÓN DE ASIENTO ITF Y COMISIONES
+# ══════════════════════════════════════════════════════════
+
+# Mapa de plantillas por banco (clave normalizada) y moneda ('Soles'/'Dolares').
+# Ajustar las rutas si las plantillas están en un subdirectorio distinto.
+_PLANTILLAS_ASIENTO: dict[tuple[str, str], str] = {
+    ("BCP",        "Dolares"): "Asiento_ITF_DOL_1.xlsm",
+    ("BCP",        "Soles"):   "Asiento_ITF_SOL_1.xlsm",
+    ("SCOTIABANK", "Dolares"): "Asiento_ITF_DOL_1.xlsm",
+    ("SCOTIABANK", "Soles"):   "Asiento_ITF_SOL_1.xlsm",
+    ("Scotia",     "Dolares"): "Asiento_ITF_DOL_1.xlsm",
+    ("Scotia",     "Soles"):   "Asiento_ITF_SOL_1.xlsm",
+    ("BN",         "Soles"):   "Asiento_ITF_SOL_1.xlsm",
+}
+
+# Meses en español tal como aparecen en el nombre del CBF
+_MESES_NUM: dict[str, int] = {
+    'ENERO': 1, 'FEBRERO': 2, 'MARZO': 3, 'ABRIL': 4,
+    'MAYO': 5, 'JUNIO': 6, 'JULIO': 7, 'AGOSTO': 8,
+    'SETIEMBRE': 9, 'SEPTIEMBRE': 9, 'OCTUBRE': 10,
+    'NOVIEMBRE': 11, 'DICIEMBRE': 12,
+}
+
+
+def _generar_asiento_itf_tras_cbf(
+    ruta_cbf: Path,
+    banco: str,
+    moneda: str,
+) -> None:
+    """Consulta el TC Venta del último día del mes y genera el asiento ITF/comisiones.
+
+    Se invoca automáticamente después de crear el archivo CBF (conciliación final).
+    El nombre del asiento de salida es ``Asiento_ITF_Comis_<stem_del_cbf>.xlsm``,
+    lo que permite identificar de qué conciliación (banco, moneda, mes) proviene.
+
+    Parameters
+    ----------
+    ruta_cbf:
+        Ruta del archivo CBF recién creado.
+    banco:
+        Nombre o ID del banco (p.ej. "BCP", "Scotia", "BN").
+    moneda:
+        Moneda tal como viene de la configuración (p.ej. "Soles (PEN)", "Dolares (USD)").
+    """
+    import re as _re_itf
+
+    print()
+    print("─" * 60)
+    print("  GENERANDO ASIENTO ITF Y COMISIONES")
+    print("─" * 60)
+
+    # ── 1. Determinar moneda corta ────────────────────────────────
+    moneda_upper = moneda.upper()
+    if any(x in moneda_upper for x in ("DOL", "USD")):
+        mon_tipo = "Dolares"
+    else:
+        mon_tipo = "Soles"
+
+    # ── 2. Determinar mes y año desde el nombre del CBF ───────────
+    stem = ruta_cbf.stem.upper()  # e.g. "CBF_STN_BCP_DOLARES_JULIO_2026_20260925"
+    patron_meses = "|".join(_MESES_NUM.keys())
+    m = _re_itf.search(rf'({patron_meses})_(\d{{4}})', stem)
+    if m:
+        nombre_mes = m.group(1)
+        anio = int(m.group(2))
+        mes = _MESES_NUM.get(nombre_mes, 0)
+    else:
+        # Fallback: leer la primera fecha de la hoja ITF y COM del propio CBF
+        try:
+            from Asiento_ITF_Comis import leer_movimientos_itf_comisiones
+            movimientos = leer_movimientos_itf_comisiones(ruta_cbf)
+            primera_fecha = movimientos[0].fecha
+            mes = primera_fecha.month
+            anio = primera_fecha.year
+        except Exception as e_fallback:
+            print(f"  [AVISO] No se pudo determinar el mes/año del CBF: {e_fallback}")
+            print("  Se omite la generación del asiento ITF y comisiones.")
+            return
+
+    # ── 3. Consultar TC Venta del último día del mes ──────────────
+    from calendar import monthrange
+    from datetime import date
+    ultimo_dia = date(anio, mes, monthrange(anio, mes)[1])
+    print(f"  >> Consultando TC Venta de Contanet para el {ultimo_dia.strftime('%d/%m/%Y')}...")
+
+    try:
+        from operaciones_sql import obtener_tipo_cambio
+        tc_venta = obtener_tipo_cambio(ultimo_dia)
+        print(f"  >> TC Venta obtenido: {tc_venta}")
+    except Exception as e_tc:
+        print(f"  [ERROR] No se pudo obtener el TC Venta de Contanet: {e_tc}")
+        print("  Se omite la generación del asiento ITF y comisiones.")
+        return
+
+    # ── 4. Seleccionar plantilla según banco y moneda ─────────────
+    # Normalizar el banco para buscar en el diccionario de plantillas
+    banco_key = banco.upper().strip()
+    plantilla_nombre = (
+        _PLANTILLAS_ASIENTO.get((banco_key, mon_tipo))
+        or _PLANTILLAS_ASIENTO.get((banco, mon_tipo))
+        or _PLANTILLAS_ASIENTO.get(("BCP", mon_tipo))  # fallback genérico
+    )
+    ruta_plantilla = Path(plantilla_nombre)
+    if not ruta_plantilla.is_file():
+        print(f"  [ERROR] Plantilla no encontrada: {ruta_plantilla}")
+        print("  Se omite la generación del asiento ITF y comisiones.")
+        return
+
+    # ── 5. Construir ruta de salida con el mismo stem del CBF ─────
+    #   Asiento_ITF_Comis_CBF_STN_BCP_Dolares_JULIO_2026_20260925.xlsm
+    nombre_salida = f"Asiento_ITF_Comis_{ruta_cbf.stem}{ruta_plantilla.suffix}"
+    ruta_salida_asiento = ruta_cbf.parent / nombre_salida
+
+    # ── 6. Determinar banco normalizado para Asiento_ITF_Comis ────
+    # Asiento_ITF_Comis acepta "BCP", "Scotia" o "BCP Miami"
+    banco_asiento = banco
+
+    # ── 7. Generar el asiento ─────────────────────────────────────
+    try:
+        from Asiento_ITF_Comis import generar_asientos_itf_comisiones
+        salida = generar_asientos_itf_comisiones(
+            ruta_cbf,
+            ruta_plantilla,
+            banco=banco_asiento,
+            moneda=mon_tipo,
+            tipo_cambio_venta=tc_venta,
+            ruta_salida=ruta_salida_asiento,
+        )
+        print(f"  >> Asiento ITF y comisiones generado: {salida}")
+    except Exception as e_asiento:
+        print(f"  [ERROR] No se pudo generar el asiento: {e_asiento}")
+
+
 # ══════════════════════════════════════════════════════════
 # FLUJO — REPORTE FINAL
 # ══════════════════════════════════════════════════════════
@@ -983,6 +1118,14 @@ def flujo_reporte_final(config: dict | None = None) -> None:
         )
     except ValueError as e:
         print(f"\n  X Error: {e}\n")
+        return
+
+    # ── Generar asiento ITF y comisiones tras la conciliación final ────
+    _generar_asiento_itf_tras_cbf(
+        ruta_cbf=ruta_salida,
+        banco=banco_nombre,
+        moneda=moneda,
+    )
 
 
 # ══════════════════════════════════════════════════════════
