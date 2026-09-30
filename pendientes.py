@@ -60,7 +60,7 @@ EMPRESAS_CATALOGO = [
     "DINSURA",
     "Peru Commerce",
     "INFOSUR",
-    "TST",
+    "Thimble",
     "Inaupari",
     "TECA",
     "DIONISO",
@@ -82,7 +82,7 @@ def _normalizar_empresa(nombre: str) -> str:
     t_sin = ''.join(c for c in t_nfd if unicodedata.category(c) != 'Mn').upper()
 
     if 'THIMBLE' in t_sin or t_sin == 'TST':
-        return 'TST'
+        return 'THIMBLE'
     if 'PERU COMMERCE' in t_sin or 'P.COMMERCE' in t_sin:
         return 'Peru_Commerce'
     if 'INVERSIONES FORESTALES' in t_sin or t_sin == 'INFOSUR':

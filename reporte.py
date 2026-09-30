@@ -671,7 +671,8 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
         
         used_c = set()
         for b_idx, b_amt in pool_b:
-            avail_c = [x for x in pool_c if x[0] not in used_c]
+            # Solo conciliar con montos del mismo signo (positivo con positivo, negativo con negativo)
+            avail_c = [x for x in pool_c if x[0] not in used_c and (x[1] > 0) == (b_amt > 0)]
             # Guard anti-explosión combinatoria: si hay demasiados candidatos, omitir
             if len(avail_c) > 25:
                 continue
@@ -713,7 +714,8 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
         
         used_b = set()
         for c_idx, c_amt in pool_c2:
-            avail_b = [x for x in pool_b2 if x[0] not in used_b]
+            # Solo conciliar con montos del mismo signo (positivo con positivo, negativo con negativo)
+            avail_b = [x for x in pool_b2 if x[0] not in used_b and (x[1] > 0) == (c_amt > 0)]
             # Guard anti-explosión combinatoria: si hay demasiados candidatos, omitir
             if len(avail_b) > 25:
                 continue
@@ -768,7 +770,8 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
     for b_idx, b_amt in _pool_b_global:
         if b_amt == 0:
             continue
-        avail_c = [x for x in _pool_c_global if x[0] not in _used_c_global]
+        # Solo conciliar con montos del mismo signo (positivo con positivo, negativo con negativo)
+        avail_c = [x for x in _pool_c_global if x[0] not in _used_c_global and (x[1] > 0) == (b_amt > 0)]
         # Guard anti-explosión combinatoria
         if len(avail_c) > 25:
             continue
@@ -796,7 +799,8 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
     for c_idx, c_amt in _pool_c_global:
         if c_amt == 0 or c_idx in _used_c_global:
             continue
-        avail_b = [x for x in _pool_b_global if x[0] not in _used_b_global]
+        # Solo conciliar con montos del mismo signo (positivo con positivo, negativo con negativo)
+        avail_b = [x for x in _pool_b_global if x[0] not in _used_b_global and (x[1] > 0) == (c_amt > 0)]
         # Guard anti-explosión combinatoria
         if len(avail_b) > 25:
             continue

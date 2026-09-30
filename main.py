@@ -194,7 +194,8 @@ EMPRESAS = [
         "nombre"  : "Thimble Sourcing / TST",
         "ruc"     : "20601987654",
         "monedas" : [
-            {"nombre": "Soles (PEN)",   "sheet_bank": ("TST", "TST SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Dolares (USD)", "sheet_bank": ("Thimble DOL", "Thimble USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
+            {"nombre": "Soles (PEN)",   "sheet_bank": ("Thimble", "Thimble SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
