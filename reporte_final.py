@@ -814,6 +814,21 @@ def _clasificar_partidas(
         if not banco_filas or not conta_filas:
             continue
 
+        # Si el grupo está completamente conciliado (todas las filas tienen MAR='X')
+        # y la clasificación es ITF, no debe aparecer en la hoja ITF y Comisiones.
+        # Comisiones/Error/Otros sí deben mostrarse aunque estén conciliados,
+        # porque el asiento contable se hace por la diferencia de monto.
+        if all(_texto(r.get('MAR')).upper() == 'X' for r in filas_grupo):
+            es_solo_itf = (
+                any(_marcado(r, col_itf) for r in filas_grupo)
+                and not any(_marcado(r, col_com) for r in filas_grupo)
+                and not any(_marcado(r, col_err) for r in filas_grupo)
+                and not any(_marcado(r, col_otr) for r in filas_grupo)
+            )
+            if es_solo_itf:
+                indices_en_grupo.update(idxs)
+                continue
+
         indices_en_grupo.update(idxs)
 
         total_b = sum(_monto(r.get('Monto-Banco')) for r in banco_filas)
@@ -879,6 +894,18 @@ def _clasificar_partidas(
     for idx, row in df_anexar_src.iterrows():
         if idx in indices_en_grupo:
             continue
+
+        # Si la fila ya fue conciliada (MAR='X') y su clasificación es SOLO ITF,
+        # no debe aparecer en la hoja ITF y Comisiones.
+        # Comisiones/Error/Otros sí deben mostrarse aunque estén conciliados,
+        # porque el asiento contable se hace por la diferencia de monto.
+        if _texto(row.get('MAR')).upper() == 'X':
+            es_itf_ind  = _marcado(row, col_itf)
+            es_com_ind  = _marcado(row, col_com)
+            es_err_ind  = _marcado(row, col_err)
+            es_otr_ind  = _marcado(row, col_otr)
+            if es_itf_ind and not (es_com_ind or es_err_ind or es_otr_ind):
+                continue
 
         es_itf = _marcado(row, col_itf)
         es_com = _marcado(row, col_com)
