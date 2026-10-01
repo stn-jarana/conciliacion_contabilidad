@@ -358,11 +358,14 @@ def generar_reporte_final(
             df_conciliados=conciliados,
             banco=banco,
             moneda=moneda,
+            mes_ref=meta.get('mes_num'),
+            anio_ref=meta.get('anio_num'),
         )
     except Exception as e_conc:
         print(f"  [AVISO] No se pudo guardar el archivo de conciliados para Contanet: {e_conc}")
 
     return ruta_salida
+
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -556,6 +559,8 @@ def _extraer_metadatos(
             9: 'SETIEMBRE', 10: 'OCTUBRE', 11: 'NOVIEMBRE', 12: 'DICIEMBRE'
         }
         meta['mes'] = f"{meses_es.get(primera_fecha.month, '')} {primera_fecha.year}"
+        meta['mes_num'] = int(primera_fecha.month)
+        meta['anio_num'] = int(primera_fecha.year)
 
     # Si no viene moneda como parámetro, intentar inferirla del Anexar1
     if not meta['moneda']:

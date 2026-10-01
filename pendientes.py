@@ -904,6 +904,8 @@ def guardar_conciliados(
     *args,
     banco: str = '',
     moneda: str = '',
+    mes_ref: int | None = None,
+    anio_ref: int | None = None,
 ) -> bool:
     """
     Guarda en la ruta de red el resumen de movimientos conciliados listos
@@ -913,14 +915,20 @@ def guardar_conciliados(
     - Crea el archivo si no existe.
     - Crea 2 hojas por empresa (una para Soles y otra para Dólares).
     - Preserva las demás hojas (otras empresas y otra moneda).
+    - ACUMULA los datos mes a mes sin borrar registros de meses anteriores.
 
     Estructura de la tabla guardada:
       Asiento Contable | Año | Mes | Número de Operación | Anotación
     """
+    # Soportar llamadas flexibles con argumentos posicionales:
     if len(args) >= 1 and isinstance(args[0], str):
         banco = args[0]
         if len(args) >= 2 and isinstance(args[1], str):
             moneda = args[1]
+            if len(args) >= 3 and (isinstance(args[2], int) or args[2] is None):
+                mes_ref = args[2]
+            if len(args) >= 4 and (isinstance(args[3], int) or args[3] is None):
+                anio_ref = args[3]
 
     ruta_archivo = _resolver_ruta_archivo(banco, sufijo="Ingreso_a_contanet", ruta_base=RUTA_RED, modo_lectura=False)
 
@@ -935,16 +943,11 @@ def guardar_conciliados(
         return False
 
     emp_norm = _normalizar_empresa(empresa)
-    hoja_soles = _nombre_hoja_empresa_moneda(emp_norm, 'Soles')
-    hoja_dolares = _nombre_hoja_empresa_moneda(emp_norm, 'Dólares')
+    hoja_soles_nom = _nombre_hoja_empresa_moneda(emp_norm, 'Soles')
+    hoja_dolares_nom = _nombre_hoja_empresa_moneda(emp_norm, 'Dólares')
 
     mon_norm = _normalizar_moneda(moneda)
-    if mon_norm == 'Dólares':
-        hoja_activa = hoja_dolares
-        hoja_otra = hoja_soles
-    else:
-        hoja_activa = hoja_soles
-        hoja_otra = hoja_dolares
+    es_dolares = (mon_norm == 'Dólares')
 
     # ── Preparar tabla de conciliados ─────────────────────────────────
     tabla = pd.DataFrame(columns=COLS_CONCILIADOS)
@@ -952,33 +955,66 @@ def guardar_conciliados(
         df = df_conciliados.copy()
         df.columns = [str(c).strip() for c in df.columns]
 
-        col_op = '# Op. Banco'
-        if col_op in df.columns:
-            mask_valido = df[col_op].apply(
-                lambda v: (
-                    pd.notna(v) and
-                    str(v).strip() not in ('', 'nan', '0', '0.0') and
-                    str(v).strip() != ''
-                )
-            )
-            df_filtrado = df[mask_valido].copy()
+        # Extraer fechas con dayfirst=True y fallback a Fecha Conta o Fecha
+        f_banco = pd.to_datetime(df.get('Fecha Banco'), dayfirst=True, errors='coerce')
+        f_conta = pd.to_datetime(df.get('Fecha Conta', df.get('Fecha')), dayfirst=True, errors='coerce')
+        fechas = f_banco.fillna(f_conta)
 
-            if not df_filtrado.empty:
-                fechas = pd.to_datetime(df_filtrado.get('Fecha Banco'), errors='coerce')
-                df_filtrado['_anio'] = fechas.dt.year.where(fechas.notna(), other=None)
-                df_filtrado['_mes']  = fechas.dt.month.where(fechas.notna(), other=None)
-                df_filtrado['_nro_op'] = df_filtrado[col_op].apply(
-                    lambda v: str(int(float(v))) if (pd.notna(v) and str(v).strip().endswith('.0')
-                              and str(v).strip()[:-2].lstrip('-').isdigit())
-                              else str(v).strip()
-                )
-                tabla = pd.DataFrame({
-                    'Asiento Contable'    : df_filtrado.get('# Registro', '').fillna('').astype(str).str.strip(),
-                    'Año'                 : df_filtrado['_anio'],
-                    'Mes'                 : df_filtrado['_mes'],
-                    'Número de Operación' : df_filtrado['_nro_op'],
-                    'Anotación'           : df_filtrado.get('Anotacion', df_filtrado.get('Anotación', '')).fillna('').astype(str).str.strip(),
-                }).reset_index(drop=True)
+        # Si aún no hay año o mes, usar mes_ref y anio_ref
+        serie_anio = fechas.dt.year
+        serie_mes  = fechas.dt.month
+        if anio_ref is not None:
+            serie_anio = serie_anio.fillna(anio_ref)
+        if mes_ref is not None:
+            serie_mes = serie_mes.fillna(mes_ref)
+
+        # Extraer número de operación buscando con fallback en varias columnas
+        def _extraer_op(row):
+            for col_cand in ['# Op. Banco', 'Banco - # Operación', '# Operación2', 'Conta - # Operación', '# Operación']:
+                v = row.get(col_cand)
+                if pd.notna(v):
+                    s = str(v).strip()
+                    if s.endswith('.0') and s[:-2].lstrip('-').isdigit():
+                        s = str(int(float(s)))
+                    if s and s.lower() not in ('nan', '0', 'none', ''):
+                        return s
+            return ''
+
+        # Extraer asiento contable buscando en # Registro o Conta - # Registro
+        def _extraer_registro(row):
+            for col_cand in ['# Registro', 'Conta - # Registro', 'Registro']:
+                v = row.get(col_cand)
+                if pd.notna(v):
+                    s = str(v).strip()
+                    if s and s.lower() not in ('nan', 'none', ''):
+                        return s
+            return ''
+
+        # Extraer anotación
+        def _extraer_anot(row):
+            for col_cand in ['Anotación', 'Anotacion']:
+                v = row.get(col_cand)
+                if pd.notna(v):
+                    s = str(v).strip()
+                    if s and s.lower() not in ('nan', 'none', ''):
+                        return s
+            return ''
+
+        nros_op = df.apply(_extraer_op, axis=1)
+        asientos = df.apply(_extraer_registro, axis=1)
+        anotaciones = df.apply(_extraer_anot, axis=1)
+
+        # Solo incluir filas que tengan al menos número de operación o asiento contable
+        mask_valido = (nros_op != '') | (asientos != '')
+        if mask_valido.any():
+            df_val = df[mask_valido].copy()
+            tabla = pd.DataFrame({
+                'Asiento Contable'    : asientos[mask_valido].astype(str).str.strip(),
+                'Año'                 : pd.to_numeric(serie_anio[mask_valido], errors='coerce').fillna(0).astype(int),
+                'Mes'                 : pd.to_numeric(serie_mes[mask_valido], errors='coerce').fillna(0).astype(int),
+                'Número de Operación' : nros_op[mask_valido].astype(str).str.strip(),
+                'Anotación'           : anotaciones[mask_valido].astype(str).str.strip(),
+            }).reset_index(drop=True)
 
     # ── Leer el archivo existente para preservar otras hojas ─────────
     hojas_dict: dict[str, pd.DataFrame] = {}
@@ -1000,27 +1036,51 @@ def guardar_conciliados(
             hojas_dict[h_s] = pd.DataFrame(columns=COLS_CONCILIADOS)
             hojas_dict[h_d] = pd.DataFrame(columns=COLS_CONCILIADOS)
 
+    # Buscar la hoja activa existente de forma flexible (ignora tildes y case)
+    hojas_existentes = list(hojas_dict.keys())
+    hoja_activa_existente = _buscar_hoja_existente(hojas_existentes, empresa, moneda)
+    hoja_activa = hoja_activa_existente or (hoja_dolares_nom if es_dolares else hoja_soles_nom)
+    hoja_otra = hoja_soles_nom if es_dolares else hoja_dolares_nom
+
     # Acumular en la hoja activa: agregar la nueva data a la ya existente
     # (no reemplazar), para preservar registros de conciliaciones anteriores.
     if hoja_activa in hojas_dict and not hojas_dict[hoja_activa].empty:
         df_existente = hojas_dict[hoja_activa].copy()
-        # Asegurar que las columnas coincidan
+        # Asegurar columnas estándar
         for col in COLS_CONCILIADOS:
             if col not in df_existente.columns:
                 df_existente[col] = ''
         df_existente = df_existente[COLS_CONCILIADOS]
+
+        # Normalizar tipos de df_existente para consistencia con tabla
+        def _clean_str(v):
+            if pd.isna(v):
+                return ''
+            s = str(v).strip()
+            if s.endswith('.0') and s[:-2].lstrip('-').isdigit():
+                return str(int(float(s)))
+            return '' if s.lower() in ('nan', 'none') else s
+
+        df_existente['Asiento Contable'] = df_existente['Asiento Contable'].apply(_clean_str)
+        df_existente['Número de Operación'] = df_existente['Número de Operación'].apply(_clean_str)
+        df_existente['Anotación'] = df_existente['Anotación'].fillna('').astype(str).str.strip()
+        df_existente['Año'] = pd.to_numeric(df_existente['Año'], errors='coerce').fillna(0).astype(int)
+        df_existente['Mes'] = pd.to_numeric(df_existente['Mes'], errors='coerce').fillna(0).astype(int)
+
         if not tabla.empty:
             df_acumulado = pd.concat([df_existente, tabla], ignore_index=True)
-            # Eliminar duplicados exactos por Asiento Contable + Número de Operación
+            # Eliminar duplicados incluyendo Año y Mes para NUNCA borrar registros de meses distintos.
+            # Solo se consideran duplicados si coinciden exactamente en Año, Mes, Asiento y Número de Op.
             df_acumulado = df_acumulado.drop_duplicates(
-                subset=['Asiento Contable', 'Número de Operación'],
+                subset=['Año', 'Mes', 'Asiento Contable', 'Número de Operación'],
                 keep='last',
             ).reset_index(drop=True)
         else:
             df_acumulado = df_existente
         hojas_dict[hoja_activa] = df_acumulado
     else:
-        hojas_dict[hoja_activa] = tabla
+        hojas_dict[hoja_activa] = tabla if not tabla.empty else pd.DataFrame(columns=COLS_CONCILIADOS)
+
     # Asegurar que la otra hoja de la empresa exista
     if hoja_otra not in hojas_dict:
         hojas_dict[hoja_otra] = pd.DataFrame(columns=COLS_CONCILIADOS)
@@ -1043,12 +1103,24 @@ def guardar_conciliados(
 
     except PermissionError:
         print(f"\n  [ERROR] No se pudo guardar el archivo de conciliados para Contanet.")
-        print(f"          El archivo '{ruta_archivo.name}' puede estar abierto por otro usuario.")
-        print("          Cierrelo e intente nuevamente.")
+        print(f"          El archivo '{ruta_archivo.name}' está abierto por Excel u otro usuario.")
+        # Guardar copia de respaldo para no perder los datos del nuevo mes
+        try:
+            from datetime import datetime
+            stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            ruta_copia = ruta_archivo.parent / f"RESPALDO_{ruta_archivo.stem}_{stamp}.xlsx"
+            with pd.ExcelWriter(ruta_copia, engine='openpyxl', datetime_format='DD/MM/YYYY') as writer:
+                for hoja_nombre, df_hoja in hojas_dict.items():
+                    df_hoja.to_excel(writer, sheet_name=hoja_nombre, index=False)
+            print(f"  [RESPALDO] ¡Los datos se guardaron en una copia segura!: {ruta_copia}")
+        except Exception:
+            pass
+        print("          Por favor cierre el archivo en Excel e intente nuevamente.")
         return False
     except Exception as e:
         print(f"\n  [ERROR] No se pudo guardar el archivo de conciliados: {e}")
         return False
+
 
 
 def _aplicar_formato_conciliados_contanet(ruta: Path, nombre_hoja: str | list[str] | None = None) -> None:

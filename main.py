@@ -83,7 +83,7 @@ def _construir_nombre_archivo(
     mon_limpia = 'Dolares' if 'USD' in moneda.upper() or 'DOL' in moneda.upper() else 'Soles'
     emp_limpia = _limpiar_nombre(empresa)
     ban_limpio = _limpiar_nombre(banco)
-    fecha_hoy  = datetime.now().strftime('%Y%m%d')
+    fecha_hoy  = datetime.now().strftime('%Y%m%d%H%M')
     nombre = f"{prefijo}_{emp_limpia}_{ban_limpio}_{mon_limpia}_{mes_anio}_{fecha_hoy}.xlsx"
     return Path(nombre)
 
@@ -941,6 +941,7 @@ def _generar_asiento_itf_tras_cbf(
     ruta_cbf: Path,
     banco: str,
     moneda: str,
+    ruc: str = '',
 ) -> None:
     """Consulta el TC Venta del último día del mes y genera el asiento ITF/comisiones.
 
@@ -1031,6 +1032,7 @@ def _generar_asiento_itf_tras_cbf(
     banco_asiento = banco
 
     # ── 7. Generar el asiento ─────────────────────────────────────
+    salida = None
     try:
         from Asiento_ITF_Comis import generar_asientos_itf_comisiones
         salida = generar_asientos_itf_comisiones(
@@ -1044,6 +1046,25 @@ def _generar_asiento_itf_tras_cbf(
         print(f"  >> Asiento ITF y comisiones generado: {salida}")
     except Exception as e_asiento:
         print(f"  [ERROR] No se pudo generar el asiento: {e_asiento}")
+        return
+
+    # ── 8. Ingreso en Contanet (Separado del flujo principal por ahora) ──
+    # Para volver a integrar el ingreso a Contanet directamente al flujo,
+    # basta con cambiar INGRESAR_A_CONTANET_AUTOMATICO a True.
+    # Por ahora se mantiene separado del flujo automático.
+    INGRESAR_A_CONTANET_AUTOMATICO = True
+
+    if INGRESAR_A_CONTANET_AUTOMATICO and salida is not None:
+        try:
+            from crear_asientos_conta import ingresar_asiento_contanet
+            print("  >> Ingresando asiento a Contanet...")
+            ingresar_asiento_contanet(salida, ruc_cliente=ruc or "20376729126", anio=str(anio))
+            print("  >> [OK] Asiento ingresado exitosamente en Contanet.")
+        except Exception as e_ing:
+            print(f"  [AVISO] No se pudo ingresar a Contanet automáticamente: {e_ing}")
+    else:
+        print("  >> [INFO] El ingreso en Contanet se mantiene separado del flujo.")
+        print("     (El archivo generado queda listo para importación manual o posterior conexión).")
 
 
 # ══════════════════════════════════════════════════════════
@@ -1126,7 +1147,9 @@ def flujo_reporte_final(config: dict | None = None) -> None:
         ruta_cbf=ruta_salida,
         banco=banco_nombre,
         moneda=moneda,
+        ruc=ruc,
     )
+
 
 
 # ══════════════════════════════════════════════════════════

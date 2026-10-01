@@ -100,13 +100,12 @@ def generar_reporte_inicial(
     print(f"  [TIEMPO] Escribir Excel: {_t3 - _t2:.2f}s")
 
     # ── Aplicar formato visual Excel ──────────────────────────────────
-    _aplicar_formato(ruta_salida)
+    # ocultar_tecnicas=True fusiona la ocultación de columnas en este mismo paso,
+    # evitando una segunda carga y guardado del workbook.
+    _aplicar_formato(ruta_salida, ocultar_tecnicas=True)
 
     _t4 = time.perf_counter()
-    print(f"  [TIEMPO] Aplicar formato: {_t4 - _t3:.2f}s")
-
-    # ── Ocultar columnas técnicas en Anexar1 del reporte inicial ──────
-    _ocultar_columnas_tecnicas(ruta_salida)
+    print(f"  [TIEMPO] Aplicar formato + ocultar columnas: {_t4 - _t3:.2f}s")
 
     _t5 = time.perf_counter()
     print(f"  [TIEMPO] TOTAL reporte inicial: {_t5 - _t0:.2f}s")
@@ -114,6 +113,7 @@ def generar_reporte_inicial(
     print(f"\n  [OK] Reporte inicial generado: {ruta_salida}")
 
     return ruta_salida
+
 
 
 
@@ -673,11 +673,12 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
         for b_idx, b_amt in pool_b:
             # Solo conciliar con montos del mismo signo (positivo con positivo, negativo con negativo)
             avail_c = [x for x in pool_c if x[0] not in used_c and (x[1] > 0) == (b_amt > 0)]
-            # Guard anti-explosión combinatoria: si hay demasiados candidatos, omitir
-            if len(avail_c) > 25:
+            # Guard anti-explosión combinatoria: si hay demasiados candidatos por fecha, omitir
+            # (reducido de 25 a 15, y max combo de 4 a 3: C(15,3)=455 vs C(25,4)=12650)
+            if len(avail_c) > 15:
                 continue
             valid_combos = []
-            for r in range(2, min(5, len(avail_c) + 1)):
+            for r in range(2, min(4, len(avail_c) + 1)):
                 for combo in combinations(avail_c, r):
                     suma_conta = sum(x[1] for x in combo)
                     diff = round(abs(abs(b_amt) - abs(suma_conta)), 2)
@@ -716,11 +717,12 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
         for c_idx, c_amt in pool_c2:
             # Solo conciliar con montos del mismo signo (positivo con positivo, negativo con negativo)
             avail_b = [x for x in pool_b2 if x[0] not in used_b and (x[1] > 0) == (c_amt > 0)]
-            # Guard anti-explosión combinatoria: si hay demasiados candidatos, omitir
-            if len(avail_b) > 25:
+            # Guard anti-explosión combinatoria: si hay demasiados candidatos por fecha, omitir
+            # (reducido de 25 a 15, y max combo de 4 a 3: C(15,3)=455 vs C(25,4)=12650)
+            if len(avail_b) > 15:
                 continue
             valid_combos = []
-            for r in range(2, min(5, len(avail_b) + 1)):
+            for r in range(2, min(4, len(avail_b) + 1)):
                 for combo in combinations(avail_b, r):
                     suma_banco = sum(x[1] for x in combo)
                     diff = round(abs(abs(suma_banco) - abs(c_amt)), 2)
@@ -767,16 +769,19 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
 
     _used_c_global = set()
     # 1 Banco = N Conta (fechas distintas, monto exacto)
+    # NOTA: Guard reducido a 10 y combinaciones máx de 3 elementos (vs. 25/6 anterior)
+    # para evitar explosión combinatoria con extractos grandes (C(10,3)=120 vs C(25,6)=177100).
+    # Coincidencias globales de 4+ movimientos entre fechas distintas son prácticamente irreales.
     for b_idx, b_amt in _pool_b_global:
         if b_amt == 0:
             continue
         # Solo conciliar con montos del mismo signo (positivo con positivo, negativo con negativo)
         avail_c = [x for x in _pool_c_global if x[0] not in _used_c_global and (x[1] > 0) == (b_amt > 0)]
-        # Guard anti-explosión combinatoria
-        if len(avail_c) > 25:
+        # Guard anti-explosión combinatoria (más estricto para el pase global sin fecha)
+        if len(avail_c) > 10:
             continue
         valid_combos = []
-        for _r in range(2, min(7, len(avail_c) + 1)):
+        for _r in range(2, min(4, len(avail_c) + 1)):
             for combo in combinations(avail_c, _r):
                 suma_conta = sum(x[1] for x in combo)
                 diff = round(abs(abs(b_amt) - abs(suma_conta)), 2)
@@ -796,16 +801,17 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
 
     _used_b_global = set()
     # N Banco = 1 Conta (fechas distintas, monto exacto)
+    # NOTA: Guard reducido a 10 y combinaciones máx de 3 elementos (ver nota arriba).
     for c_idx, c_amt in _pool_c_global:
         if c_amt == 0 or c_idx in _used_c_global:
             continue
         # Solo conciliar con montos del mismo signo (positivo con positivo, negativo con negativo)
         avail_b = [x for x in _pool_b_global if x[0] not in _used_b_global and (x[1] > 0) == (c_amt > 0)]
-        # Guard anti-explosión combinatoria
-        if len(avail_b) > 25:
+        # Guard anti-explosión combinatoria (más estricto para el pase global sin fecha)
+        if len(avail_b) > 10:
             continue
         valid_combos = []
-        for _r in range(2, min(7, len(avail_b) + 1)):
+        for _r in range(2, min(4, len(avail_b) + 1)):
             for combo in combinations(avail_b, _r):
                 suma_banco = sum(x[1] for x in combo)
                 diff = round(abs(abs(suma_banco) - abs(c_amt)), 2)
@@ -1035,61 +1041,85 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
                 matched_itf = True
 
     # 4.5. Sugerencias por Factoring (Glosa contiene 'factoring' y montos iguales sin importar la fecha)
-    for b_idx, row_b in banco_ext.iterrows():
-        if row_b['_matched']: continue
-        if str(banco_ext.at[b_idx, 'Anotación']).startswith('Sugerido'): continue
-        m_b = float(row_b.get('Monto-Banco', 0) or 0)
-        if m_b == 0: continue
-        
-        for c_idx, row_c in conta_ext.iterrows():
-            if row_c['_matched']: continue
-            if row_c.get('_suggested', False): continue
-            if str(conta_ext.at[c_idx, 'Anotación']).startswith('Sugerido'): continue
-            
-            glosa_c = str(row_c.get('Conta - Glosa', '')).lower()
-            if 'factoring' in glosa_c:
-                m_c = float(row_c.get('Monto-Conta', 0) or 0)
-                if round(abs(m_b - m_c), 2) == 0.0:
-                    op_link = f"SUG-FACT-{b_idx}-{c_idx}"
-                    banco_ext.at[b_idx, '# Operación2'] = op_link
-                    conta_ext.at[c_idx, '# Operación2'] = op_link
-                    
-                    anot_fact = "Sugerido: Factoring"
-                    banco_ext.at[b_idx, 'Anotación'] = anot_fact
-                    conta_ext.at[c_idx, 'Anotación'] = anot_fact
-                    
-                    conta_ext.at[c_idx, '_suggested'] = True
-                    break
+    # Vectorizado: pre-filtrar candidatos de conta con 'factoring' y cruzar con banco por monto.
+    _mask_b_fact = (
+        (~banco_ext['_matched']) &
+        (~banco_ext['Anotación'].astype(str).str.startswith('Sugerido')) &
+        (banco_ext['_monto_r'] != 0)
+    )
+    _mask_c_fact = (
+        (~conta_ext['_matched']) &
+        (~conta_ext.get('_suggested', pd.Series([False] * len(conta_ext)))) &
+        (~conta_ext['Anotación'].astype(str).str.startswith('Sugerido')) &
+        (conta_ext['Conta - Glosa'].astype(str).str.lower().str.contains('factoring', na=False))
+    )
+    _pool_b_fact = banco_ext[_mask_b_fact][['_monto_r']].copy()
+    _pool_c_fact = conta_ext[_mask_c_fact][['_monto_r']].copy()
+    if not _pool_b_fact.empty and not _pool_c_fact.empty:
+        # Para cada monto de banco, buscar candidatos en conta con el mismo monto
+        _matched_b_fact: set = set()
+        _matched_c_fact: set = set()
+        for b_idx in _pool_b_fact.index:
+            if b_idx in _matched_b_fact:
+                continue
+            m_b = banco_ext.at[b_idx, '_monto_r']
+            cands = _pool_c_fact[
+                (abs(_pool_c_fact['_monto_r'] - m_b) <= 0.01) &
+                (~_pool_c_fact.index.isin(_matched_c_fact))
+            ]
+            if len(cands) == 1:
+                c_idx = cands.index[0]
+                op_link = f"SUG-FACT-{b_idx}-{c_idx}"
+                anot_fact = "Sugerido: Factoring"
+                banco_ext.at[b_idx, '# Operación2'] = op_link
+                conta_ext.at[c_idx, '# Operación2'] = op_link
+                banco_ext.at[b_idx, 'Anotación'] = anot_fact
+                conta_ext.at[c_idx, 'Anotación'] = anot_fact
+                conta_ext.at[c_idx, '_suggested'] = True
+                _matched_b_fact.add(b_idx)
+                _matched_c_fact.add(c_idx)
 
     # 4.6. Sugerencias por Cambio de Moneda (Glosa 'cambio'/'moneda'/'tc' y Descripción 'COMU')
-    for b_idx, row_b in banco_ext.iterrows():
-        if row_b['_matched']: continue
-        if str(banco_ext.at[b_idx, 'Anotación']).startswith('Sugerido'): continue
-        
-        desc_b = str(row_b.get('Banco - Descripción', '')).upper()
-        if 'COMU' in desc_b:
-            m_b = float(row_b.get('Monto-Banco', 0) or 0)
-            if m_b == 0: continue
-            
-            for c_idx, row_c in conta_ext.iterrows():
-                if row_c['_matched']: continue
-                if row_c.get('_suggested', False): continue
-                if str(conta_ext.at[c_idx, 'Anotación']).startswith('Sugerido'): continue
-                
-                glosa_c = str(row_c.get('Conta - Glosa', '')).lower()
-                if 'cambio' in glosa_c or 'moneda' in glosa_c or 'tc' in glosa_c:
-                    m_c = float(row_c.get('Monto-Conta', 0) or 0)
-                    if round(abs(abs(m_b) - abs(m_c)), 2) == 0.0:
-                        op_link = f"SUG-CAMBIO-{b_idx}-{c_idx}"
-                        banco_ext.at[b_idx, '# Operación2'] = op_link
-                        conta_ext.at[c_idx, '# Operación2'] = op_link
-                        
-                        anot_cambio = "Sugerido: Cambio de Moneda (COMUS)"
-                        banco_ext.at[b_idx, 'Anotación'] = anot_cambio
-                        conta_ext.at[c_idx, 'Anotación'] = anot_cambio
-                        
-                        conta_ext.at[c_idx, '_suggested'] = True
-                        break
+    # Vectorizado: pre-filtrar ambos lados y cruzar por monto.
+    _mask_b_comu = (
+        (~banco_ext['_matched']) &
+        (~banco_ext['Anotación'].astype(str).str.startswith('Sugerido')) &
+        (banco_ext['Banco - Descripción'].astype(str).str.upper().str.contains('COMU', na=False)) &
+        (banco_ext['_monto_r'] != 0)
+    )
+    _mask_c_comu = (
+        (~conta_ext['_matched']) &
+        (~conta_ext.get('_suggested', pd.Series([False] * len(conta_ext)))) &
+        (~conta_ext['Anotación'].astype(str).str.startswith('Sugerido')) &
+        (conta_ext['Conta - Glosa'].astype(str).str.lower().str.contains(
+            r'cambio|moneda|\btc\b', na=False, regex=True
+        ))
+    )
+    _pool_b_comu = banco_ext[_mask_b_comu][['_monto_r']].copy()
+    _pool_c_comu = conta_ext[_mask_c_comu][['_monto_r']].copy()
+    if not _pool_b_comu.empty and not _pool_c_comu.empty:
+        _matched_b_comu: set = set()
+        _matched_c_comu: set = set()
+        for b_idx in _pool_b_comu.index:
+            if b_idx in _matched_b_comu:
+                continue
+            m_b = banco_ext.at[b_idx, '_monto_r']
+            cands = _pool_c_comu[
+                (abs(_pool_c_comu['_monto_r'].abs() - abs(m_b)) <= 0.01) &
+                (~_pool_c_comu.index.isin(_matched_c_comu))
+            ]
+            if len(cands) == 1:
+                c_idx = cands.index[0]
+                op_link = f"SUG-CAMBIO-{b_idx}-{c_idx}"
+                anot_cambio = "Sugerido: Cambio de Moneda (COMUS)"
+                banco_ext.at[b_idx, '# Operación2'] = op_link
+                conta_ext.at[c_idx, '# Operación2'] = op_link
+                banco_ext.at[b_idx, 'Anotación'] = anot_cambio
+                conta_ext.at[c_idx, 'Anotación'] = anot_cambio
+                conta_ext.at[c_idx, '_suggested'] = True
+                _matched_b_comu.add(b_idx)
+                _matched_c_comu.add(c_idx)
+
 
     # 4.7. Sugerencias por Sub-código / Referencia (ej. P07, P08) en Descripción de Banco y Glosa/Giro de Contabilidad + Monto igual
     for c_idx, row_c in conta_ext.iterrows():
@@ -1128,30 +1158,44 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
 
     # 5. Sugerencias por diferencias de montos específicos
     diferencias = diferencias_set
-    
-    for b_idx, row_b in banco_ext.iterrows():
-        if row_b['_matched']: continue
-        if str(banco_ext.at[b_idx, 'Anotación']).startswith('Sugerido'): continue
-        m_b = float(row_b.get('Monto-Banco', 0) or 0)
-        
-        for c_idx, row_c in conta_ext.iterrows():
-            if row_c['_matched']: continue
-            if row_c.get('_suggested', False): continue
-            if str(conta_ext.at[c_idx, 'Anotación']).startswith('Sugerido'): continue
-            
-            m_c = float(row_c.get('Monto-Conta', 0) or 0)
-            
-            diff = round(abs(abs(m_b) - abs(m_c)), 2)
-            if diff in diferencias:
+
+    # 5. Sugerencias por diferencias de montos específicos — vectorizado.
+    # Pre-filtrar lados banco y conta candidatos, luego cruzar con merge por diferencia.
+    _mask_b5 = (
+        (~banco_ext['_matched']) &
+        (~banco_ext['Anotación'].astype(str).str.startswith('Sugerido'))
+    )
+    _mask_c5 = (
+        (~conta_ext['_matched']) &
+        (~conta_ext.get('_suggested', pd.Series([False] * len(conta_ext)))) &
+        (~conta_ext['Anotación'].astype(str).str.startswith('Sugerido'))
+    )
+    _unm_b5 = banco_ext[_mask_b5][['_monto_r']].copy()
+    _unm_c5 = conta_ext[_mask_c5][['_monto_r']].copy()
+    _used_b5: set = set()
+    _used_c5: set = set()
+    if not _unm_b5.empty and not _unm_c5.empty:
+        for b_idx in _unm_b5.index:
+            if b_idx in _used_b5:
+                continue
+            m_b = _unm_b5.at[b_idx, '_monto_r']
+            # Candidatos de conta con diferencia en el set conocido y mismo signo
+            avail_c = _unm_c5[~_unm_c5.index.isin(_used_c5)]
+            diffs = (avail_c['_monto_r'].abs() - abs(m_b)).abs().round(2)
+            mask_dif = diffs.isin(diferencias) & ((avail_c['_monto_r'] > 0) == (m_b > 0))
+            cands = avail_c[mask_dif]
+            if len(cands) >= 1:
+                c_idx = cands.index[0]
+                diff = round(abs(abs(m_b) - abs(conta_ext.at[c_idx, '_monto_r'])), 2)
                 op_link = f"SUG-DIF-{diff}-{b_idx}"
                 banco_ext.at[b_idx, '# Operación2'] = op_link
                 conta_ext.at[c_idx, '# Operación2'] = op_link
-                
                 banco_ext.at[b_idx, 'Anotación'] = f"Sugerido: Diferencia {diff}"
                 conta_ext.at[c_idx, 'Anotación'] = f"Sugerido: Diferencia {diff}"
-                
                 conta_ext.at[c_idx, '_suggested'] = True
-                break
+                _used_b5.add(b_idx)
+                _used_c5.add(c_idx)
+
 
     # 5.4. Sugerencia por Monto Único en todo el extracto (sin importar la fecha)
     unmatched_b_df = banco_ext[(~banco_ext['_matched']) & (~banco_ext['Anotación'].astype(str).str.startswith('Sugerido'))]
@@ -1328,13 +1372,12 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
         ]
         if not pool_b_cand or len(pool_b_cand) < 2:
             continue
-        # Guard anti-explosión combinatoria: si hay demasiados candidatos de banco,
-        # el número de combinaciones sería intratable (C(30,6) ya > 590k). Omitir.
-        if len(pool_b_cand) > 25:
+        # Guard anti-explosión combinatoria: limitar candidatos de banco a máx 20 y combinaciones a máx 3
+        if len(pool_b_cand) > 20:
             continue
 
         combos_validos = []
-        for r in range(2, min(6, len(pool_b_cand) + 1)):
+        for r in range(2, min(4, len(pool_b_cand) + 1)):
             for combo in combinations(pool_b_cand, r):
                 if round(abs(sum(x[1] for x in combo) - m_asiento), 2) <= 0.01:
                     combos_validos.append(combo)
@@ -1359,46 +1402,52 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
                 conta_ext.at[c_idx, '_suggested'] = True
             asientos_conta.remove(a)
 
-    # 6.4 Varios Banco = Varios Asientos Conta (N Banco = M Asientos general)
-    if len(asientos_conta) >= 2 and len(idxs_unm_b) >= 2:
-        for r_c in range(2, min(5, len(asientos_conta) + 1)):
-            matched_nm = False
-            for combo_c in combinations(asientos_conta, r_c):
-                suma_c_combo = round(sum(a['monto'] for a in combo_c), 2)
-                if suma_c_combo == 0:
-                    continue
-                pool_b_cand = [
-                    (b_idx, float(banco_ext.at[b_idx, 'Monto-Banco'] or 0))
-                    for b_idx in idxs_unm_b
-                    if (float(banco_ext.at[b_idx, 'Monto-Banco'] or 0) > 0) == (suma_c_combo > 0)
-                ]
-                combos_b_validos = []
-                for r_b in range(2, min(8, len(pool_b_cand) + 1)):
-                    for combo_b in combinations(pool_b_cand, r_b):
-                        if round(abs(sum(x[1] for x in combo_b) - suma_c_combo), 2) <= 0.01:
-                            combos_b_validos.append(combo_b)
-                            if len(combos_b_validos) > 1:
-                                break
-                    if combos_b_validos:
-                        break
-                if len(combos_b_validos) == 1:
-                    combo_b_elegido = combos_b_validos[0]
-                    b_idxs_combo = [x[0] for x in combo_b_elegido]
-                    op_link = "SUG-NxM-ASIENTOS"
-                    anot = f"Sugerido: {len(b_idxs_combo)} Banco = {len(combo_c)} Asientos Conta"
-                    for b_idx in b_idxs_combo:
-                        banco_ext.at[b_idx, '# Operación2'] = op_link
-                        banco_ext.at[b_idx, 'Anotación'] = anot
-                        idxs_unm_b.remove(b_idx)
-                    for a in combo_c:
-                        for c_idx in a['idxs']:
-                            conta_ext.at[c_idx, '# Operación2'] = op_link
-                            conta_ext.at[c_idx, 'Anotación'] = anot
-                            conta_ext.at[c_idx, '_suggested'] = True
-                        asientos_conta.remove(a)
-                    matched_nm = True
+    # 6.4 Varios a Varios reducido (Máximo 2 a Muchos, con límite de 50 candidatos)
+    # Para evitar bloqueos y explosión combinatoria:
+    # 1. Se omite si hay más de 50 asientos de contabilidad o más de 50 movimientos de banco sin conciliar.
+    # 2. Se limita a máximo 2 asientos conta (r_c = 2) contra 2 a 3 de banco (r_b = 2 a 3).
+    # 3. Cada pool individual de banco se limita a un máximo de 15 candidatos.
+    if 2 <= len(asientos_conta) <= 50 and 2 <= len(idxs_unm_b) <= 50:
+        matched_nm = False
+        # Exactamente 2 asientos conta (2 a muchos)
+        for combo_c in combinations(asientos_conta, 2):
+            suma_c_combo = round(sum(a['monto'] for a in combo_c), 2)
+            if suma_c_combo == 0:
+                continue
+            pool_b_cand = [
+                (b_idx, float(banco_ext.at[b_idx, 'Monto-Banco'] or 0))
+                for b_idx in idxs_unm_b
+                if (float(banco_ext.at[b_idx, 'Monto-Banco'] or 0) > 0) == (suma_c_combo > 0)
+            ]
+            if len(pool_b_cand) > 15:
+                continue
+
+            combos_b_validos = []
+            for r_b in range(2, min(4, len(pool_b_cand) + 1)):
+                for combo_b in combinations(pool_b_cand, r_b):
+                    if round(abs(sum(x[1] for x in combo_b) - suma_c_combo), 2) <= 0.01:
+                        combos_b_validos.append(combo_b)
+                        if len(combos_b_validos) > 1:
+                            break
+                if combos_b_validos:
                     break
-            if matched_nm:
+
+            if len(combos_b_validos) == 1:
+                combo_b_elegido = combos_b_validos[0]
+                b_idxs_combo = [x[0] for x in combo_b_elegido]
+                op_link = "SUG-NxM-ASIENTOS"
+                anot = f"Sugerido: {len(b_idxs_combo)} Banco = {len(combo_c)} Asientos Conta"
+                for b_idx in b_idxs_combo:
+                    banco_ext.at[b_idx, '# Operación2'] = op_link
+                    banco_ext.at[b_idx, 'Anotación'] = anot
+                    idxs_unm_b.remove(b_idx)
+                for a in combo_c:
+                    for c_idx in a['idxs']:
+                        conta_ext.at[c_idx, '# Operación2'] = op_link
+                        conta_ext.at[c_idx, 'Anotación'] = anot
+                        conta_ext.at[c_idx, '_suggested'] = True
+                    asientos_conta.remove(a)
+                matched_nm = True
                 break
 
     # ══════════════════════════════════════════════════════════════════════
@@ -1439,12 +1488,12 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             avail_b = [x for x in _unm_b_6b if x[0] not in _used_b_6b]
             if len(avail_b) < 2:
                 continue
-            # Guard anti-explosión combinatoria
-            if len(avail_b) > 30:
+            # Guard anti-explosión combinatoria: máx 15 disponibles y máx 3 combinados
+            if len(avail_b) > 15:
                 continue
             # Buscar la combinación única que sume exactamente c_amt
             _valid: list = []
-            for _r in range(2, min(len(avail_b) + 1, 10)):
+            for _r in range(2, min(len(avail_b) + 1, 4)):
                 for combo in combinations(avail_b, _r):
                     if round(abs(abs(sum(x[1] for x in combo)) - abs(c_amt)), 2) == 0.0:
                         _valid.append(combo)
@@ -1473,11 +1522,11 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             avail_c = [x for x in _unm_c_6b if x[0] not in _used_c_6b]
             if len(avail_c) < 2:
                 continue
-            # Guard anti-explosión combinatoria
-            if len(avail_c) > 30:
+            # Guard anti-explosión combinatoria: máx 15 disponibles y máx 3 combinados
+            if len(avail_c) > 15:
                 continue
             _valid = []
-            for _r in range(2, min(len(avail_c) + 1, 10)):
+            for _r in range(2, min(len(avail_c) + 1, 4)):
                 for combo in combinations(avail_c, _r):
                     if round(abs(abs(sum(x[1] for x in combo)) - abs(b_amt)), 2) == 0.0:
                         _valid.append(combo)
@@ -1825,175 +1874,115 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
     # Comisiones → DIF COMISON != 0 Y la diferencia es una comisión conocida
     # Error      → par de Observación (diferencia que NO es comisión) solo en fila banco
     # Otros      → vacío (el especialista marca si aplica)
+    # ── 4 columnas de clasificación de diferencias ────────────────────
+    # Vectorizado: se calculan sobre columnas completas en lugar de apply(axis=1).
     _difs_comision = _diferencias_comision(moneda)
-
-    def _marcar_itf(row):
-        desc = str(row.get('Banco - Descripción', '') or '').upper().strip()
-        if not desc:
-            return ''
-        if 'ITF' in desc or 'IMPUESTO A LOS CREDITOS' in desc or 'IMPUESTO A LOS DEBITOS' in desc:
-            return 'X'
-        return ''
-
-    def _es_comision_scotiabank_desc(desc: str) -> bool:
-        if not desc:
-            return False
-        d_upper = desc.upper().strip()
-        # Descripciones exactas o contenidas
-        conceptos_fijos = [
-            'TBK-MANTENIMIENTO',
-            'PORTES ESTADO DE CUENTA',
-            'MANT TBK CORPO EMP RELAC',
-            'COMIS.TRF.CTAS 3ROS BCR',
-        ]
-        if any(c in d_upper for c in conceptos_fijos):
-            return True
-        # Comiencen con la palabra Comis y Mant. (soporta COMIS, COMIS., COMISION, MANT, MANT., MANTENIMIENTO)
-        if re.match(r'^(?:COMIS|MANT)\b|\bCOMIS\b|\bMANT\b', d_upper):
-            return True
-        return False
-
-    def _es_comision_bcp_desc(desc: str) -> bool:
-        """Detecta comisiones/mantenimiento en el campo Detalle del extracto BCP.
-
-        Patrones reconocidos (insensible a mayúsculas/tildes):
-        - COM, COM., COMI, COMIS, COMISION, COMISIÓN, y cualquier variante que
-          empiece por COM seguida de letras típicas de 'comisión'.
-        - MANT, MANT., MANTENIMIENTO, MANTENIMIENTO. y similares.
-        """
-        if not desc:
-            return False
-        d_upper = desc.upper().strip()
-        # Eliminar tildes para comparación robusta
-        d_norm = ''.join(
-            c for c in unicodedata.normalize('NFD', d_upper)
-            if unicodedata.category(c) != 'Mn'
-        )
-        # Patrón: palabra que empiece con COM (comisión, comi, com., com, etc.)
-        # o con MANT (mantenimiento, mant., mant, etc.)
-        # Se usa \b o fin de palabra/puntuación para evitar falsos positivos
-        if re.search(r'\bCOM(?:IS(?:ION)?|I|\.?)?\b', d_norm):
-            return True
-        if re.search(r'\bMANT(?:ENIMIENTO)?\b', d_norm):
-            return True
-        return False
-
-    # Resolver clave del banco una sola vez (usada en _marcar_comisiones)
     try:
         from bancos import clave_banco as _clave_banco
         _banco_clave = _clave_banco(banco) if banco else ''
     except Exception:
         _banco_clave = ''
 
-    def _marcar_comisiones(row):
-        # Si la fila ya es ITF, no marcar también como comisión
-        if _marcar_itf(row) == 'X':
-            return ''
-        desc = str(row.get('Banco - Descripción', '') or '')
-        # Regla explícita por descripción de banco, diferenciada por banco
-        if _banco_clave == 'BCP':
-            if _es_comision_bcp_desc(desc):
-                return 'X'
-        else:
-            if _es_comision_scotiabank_desc(desc):
-                return 'X'
+    # ITF: descripción banco contiene 'ITF'
+    desc_series = anexar['Banco - Descripción'].fillna('').astype(str)
+    desc_upper = desc_series.str.upper()
+    anexar['ITF'] = desc_upper.str.contains(r'\bITF\b|IMPUESTO A LOS CREDITOS|IMPUESTO A LOS DEBITOS',
+                                             na=False, regex=True).map({True: 'X', False: ''})
 
-        dif = row.get('DIF COMISON')
-        try:
-            dif_f = float(dif) if dif is not None else 0.0
-        except (ValueError, TypeError):
-            return ''
-        if dif_f == 0.0:
-            return ''
-        # Si la anotación es por sufijo de operación y hay diferencia, marcar 'X' en Comisiones
-        anot = str(row.get('Anotación', '') or '').lower()
-        if 'sufijo de # operación' in anot:
-            return 'X'
-        # Solo marcar como comisión si el valor absoluto corresponde a una comisión conocida
-        return 'X' if round(abs(dif_f), 2) in _difs_comision else ''
+    # Comisiones: por descripción banco o por DIF COMISON conocida
+    anotacion_s = anexar['Anotación'].astype(str)
+    dif_s = pd.to_numeric(anexar['DIF COMISON'], errors='coerce').fillna(0.0)
+    dif_abs = dif_s.abs().round(2)
 
-    def _marcar_error(row):
-        anot = str(row.get('Anotación', '') or '')
-        # Si es por sufijo de operación, se clasifica en Comisiones a petición del usuario
-        if 'sufijo de # operación' in anot.lower():
-            return ''
-        # Solo aplica a pares de Observación (diferencia de monto con mismo código)
-        if 'diferencia de monto' not in anot.lower():
-            return ''
-        # Solo en la fila banco (tiene Monto-Banco), no en la fila conta
-        if not pd.notna(row.get('Monto-Banco')):
-            return ''
-        # Si la diferencia ya está capturada como comisión conocida, no es error
-        dif = row.get('DIF COMISON')
-        try:
-            dif_f = float(dif) if dif is not None else 0.0
-        except (ValueError, TypeError):
-            dif_f = 0.0
-        if round(abs(dif_f), 2) in _difs_comision:
-            return ''
-        return 'X'
+    def _safe_es_comision_bcp(val: object) -> bool:
+        if val is None or pd.isna(val):
+            return False
+        s = str(val).strip().upper()
+        if not s or s in ('NAN', 'NONE', '0'):
+            return False
+        s_norm = ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+        return bool(_pat_com_bcp.search(s_norm))
 
-    anexar['ITF']        = anexar.apply(_marcar_itf, axis=1)
-    anexar['Comisiones'] = anexar.apply(_marcar_comisiones, axis=1)
-    anexar['Error']      = anexar.apply(_marcar_error, axis=1)
-    anexar['Otros']      = ''
+    def _safe_es_comision_sco(val: object) -> bool:
+        if val is None or pd.isna(val):
+            return False
+        s = str(val).strip().upper()
+        if not s or s in ('NAN', 'NONE', '0'):
+            return False
+        if any(c in s for c in _conceptos_fijos):
+            return True
+        return bool(_pat_com_sco.search(s))
 
-    # Crear una clave de ordenamiento:
-    # 0 = Conciliados (MAR == 'X')
-    # 1 = Faltan conciliar pero tienen sugerencia ('Sugerido:' en Anotación)
-    # 2 = Mov. solo en banco / Mov. solo en conta
-    # 3 = Comisiones no sugeridas
-    # 4 = ITF no sugerido
-    # 5 = Sin monto (ingreso=0 y egreso=0)
-    def _orden_grupo(row):
-        anotacion = str(row.get('Anotación', ''))
-        # Sin monto: siempre al final de todo (aplica a banco y a conta)
-        if 'sin monto (0)' in anotacion.lower():
-            return 5
-        if row.get('MAR') == 'X':
-            return 0
-        # Sugeridos (faltan conciliar pero tienen sugerencia, incluyendo ITF sugerido)
-        if 'Sugerido:' in anotacion:
-            return 1
-        # Comisiones no sugeridas
-        if row.get('Comisiones') == 'X':
-            return 3
-        # ITF no sugerido
-        if row.get('ITF') == 'X':
-            return 4
-        # Solo en banco o solo en conta
-        return 2
+    if _banco_clave == 'BCP':
+        _pat_com_bcp = re.compile(r'\bCOM(?:IS(?:ION)?|I|\.?)?\b|\bMANT(?:ENIMIENTO)?\b', re.IGNORECASE)
+        desc_es_comision = desc_series.map(_safe_es_comision_bcp)
+    else:
+        _conceptos_fijos = ['TBK-MANTENIMIENTO', 'PORTES ESTADO DE CUENTA',
+                            'MANT TBK CORPO EMP RELAC', 'COMIS.TRF.CTAS 3ROS BCR']
+        _pat_com_sco = re.compile(r'^(?:COMIS|MANT)\b|\bCOMIS\b|\bMANT\b', re.IGNORECASE)
+        desc_es_comision = desc_series.map(_safe_es_comision_sco)
 
-    anexar['_orden_conciliado'] = anexar.apply(_orden_grupo, axis=1)
+    _difs_set = _difs_comision
+    mask_itf        = anexar['ITF'] == 'X'
+    mask_suf_op     = anotacion_s.str.lower().str.contains('sufijo de # operación', na=False)
+    mask_dif_nonzero = dif_s != 0.0
+    mask_dif_comision = dif_abs.isin(_difs_set)
 
-    # Para sugeridos: mantener pares juntos usando # Operación2 como sub-clave
-    def get_op2_sort(row, ord_c):
-        if ord_c == 1:
-            return str(row.get('# Operación2', ''))
-        return ''
-
-    anexar['_op2_sort'] = anexar.apply(lambda r: get_op2_sort(r, r['_orden_conciliado']), axis=1)
-
-    # Para grupo 2 (solo en banco y solo en conta), calcular monto para ordenar de mayor a menor
-    def get_monto_abs(row):
-        mb = row.get('Monto-Banco')
-        mc = row.get('Monto-Conta')
-        vb = abs(float(mb)) if pd.notna(mb) and str(mb) != 'nan' else 0.0
-        vc = abs(float(mc)) if pd.notna(mc) and str(mc) != 'nan' else 0.0
-        return max(vb, vc)
-
-    anexar['_monto_abs'] = anexar.apply(get_monto_abs, axis=1)
-
-    # Para grupo 2, queremos de mayor a menor (-_monto_abs)
-    anexar['_monto_sort'] = anexar.apply(
-        lambda r: -r['_monto_abs'] if r['_orden_conciliado'] == 2 else 0, axis=1
+    comisiones_mask = (
+        (~mask_itf) &
+        (
+            desc_es_comision |
+            (mask_dif_nonzero & mask_suf_op) |
+            (mask_dif_nonzero & mask_dif_comision)
+        )
     )
+    anexar['Comisiones'] = comisiones_mask.map({True: 'X', False: ''})
+
+    # Error: pares de Observación con diferencia no comisión, solo fila banco
+    mask_dif_texto    = anotacion_s.str.lower().str.contains('diferencia de monto', na=False)
+    mask_tiene_banco  = anexar['Monto-Banco'].notna()
+    mask_error = (
+        mask_dif_texto &
+        mask_tiene_banco &
+        (~mask_suf_op) &
+        (~mask_dif_comision | ~mask_dif_nonzero)
+    )
+    anexar['Error'] = mask_error.map({True: 'X', False: ''})
+    anexar['Otros'] = ''
+
+    # ── Orden de grupos (vectorizado) ─────────────────────────────────
+    # 0=Conciliados, 1=Sugeridos, 2=Solo banco/conta, 3=Comisiones, 4=ITF, 5=Sin monto
+    mask_sin_monto  = anotacion_s.str.lower().str.contains('sin monto (0)', regex=False)
+    mask_mar_x      = anexar['MAR'] == 'X'
+    mask_sugerido   = anotacion_s.str.contains('Sugerido:', na=False)
+    mask_com_nosug  = (anexar['Comisiones'] == 'X') & ~mask_sugerido
+    mask_itf_nosug  = (anexar['ITF'] == 'X') & ~mask_sugerido
+
+    orden = pd.Series(2, index=anexar.index)
+    orden[mask_mar_x]     = 0
+    orden[mask_sugerido]  = 1
+    orden[mask_com_nosug] = 3
+    orden[mask_itf_nosug] = 4
+    orden[mask_sin_monto] = 5
+    anexar['_orden_conciliado'] = orden
+
+    # op2_sort: clave de agrupación para sugeridos
+    op2_vals = anexar['# Operación2'].astype(str)
+    anexar['_op2_sort'] = op2_vals.where(orden == 1, '')
+
+    # monto_abs para ordenar no conciliados de mayor a menor
+    mb_num = pd.to_numeric(anexar['Monto-Banco'], errors='coerce').fillna(0.0).abs()
+    mc_num = pd.to_numeric(anexar['Monto-Conta'], errors='coerce').fillna(0.0).abs()
+    monto_abs = mb_num.combine(mc_num, max)
+    anexar['_monto_abs'] = monto_abs
+    anexar['_monto_sort'] = monto_abs.where(orden == 2, 0.0).mul(-1)
 
     anexar = anexar.sort_values(
         by=['_orden_conciliado', '_op2_sort', '_monto_sort', 'Fecha']
     ).drop(columns=['_orden_conciliado', '_op2_sort', '_monto_abs', '_monto_sort']).reset_index(drop=True)
 
     return anexar
+
 
 
 def _preparar_resumen(anexar1: pd.DataFrame) -> pd.DataFrame:
@@ -2032,8 +2021,12 @@ _COLORES = {
 }
 
 
-def _aplicar_formato(ruta: Path) -> None:
-    """Aplica formato básico: cabecera con color, autoajuste de columnas, congelar fila."""
+def _aplicar_formato(ruta: Path, ocultar_tecnicas: bool = False) -> None:
+    """Aplica formato básico: cabecera con color, autoajuste de columnas, congelar fila.
+
+    Si ocultar_tecnicas=True, oculta en el mismo paso las columnas técnicas de Anexar1
+    (evita abrir el workbook dos veces).
+    """
     wb = openpyxl.load_workbook(ruta)
 
     thin = Side(style='thin', color='D9D9D9')
@@ -2063,6 +2056,9 @@ def _aplicar_formato(ruta: Path) -> None:
         return _font_cache[key]
 
     _fill_none = _get_fill('FFFFFF')  # blanco (sin relleno efectivo pero evita None)
+
+    # Columnas técnicas a ocultar en Anexar1 (cuando ocultar_tecnicas=True)
+    _COLS_OCULTAR = {'Banco - Fecha', 'Conta - Fecha', 'TIPO', 'CODIGO', '# Operación2'}
 
     for nombre_hoja in wb.sheetnames:
         ws = wb[nombre_hoja]
@@ -2128,6 +2124,13 @@ def _aplicar_formato(ruta: Path) -> None:
                 col_op2_idx = len(header_names) - 1
             elif val == 'Banco - Descripción':
                 col_banco_desc_idx = len(header_names) - 1
+
+        # Ocultar columnas técnicas en Anexar1 si se solicitó
+        if ocultar_tecnicas and nombre_hoja == 'Anexar1':
+            for i, cell in enumerate(ws[1]):
+                if str(cell.value or '').strip() in _COLS_OCULTAR:
+                    col_letter = get_column_letter(cell.column)
+                    ws.column_dimensions[col_letter].hidden = True
 
         # Pre-calcular para Anexar1: asignar color de fondo alternado por grupo sugerido
         COLORES_SUG = ['FFF2CC', 'FCE4D6']
@@ -2269,6 +2272,9 @@ def _ocultar_columnas_tecnicas(ruta: Path) -> None:
     Oculta en la hoja Anexar1 las columnas técnicas que no necesita ver el especialista.
     Se ocultan: Banco - Fecha, Conta - Fecha, TIPO, CODIGO, # Operación2
     DIF COMISON se mantiene visible para que el especialista pueda ver la diferencia.
+
+    NOTA: Esta función existe por compatibilidad. El camino preferido es pasar
+    ocultar_tecnicas=True a _aplicar_formato para evitar una segunda carga del workbook.
     """
     COLS_OCULTAR = {
         'Banco - Fecha', 'Conta - Fecha', 'TIPO', 'CODIGO',
@@ -2287,3 +2293,4 @@ def _ocultar_columnas_tecnicas(ruta: Path) -> None:
             ws.column_dimensions[col_letter].hidden = True
 
     wb.save(ruta)
+

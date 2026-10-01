@@ -77,7 +77,7 @@ def elegir_procesos(app: Application):
         print(f"Error al intentar abrir Procesos: {e}")
 
 
-def import_conta(app, archivo='Plantilla comisiones 06-2026 Bcp Dolares.xlsm'):
+def import_conta(app, archivo='Plantilla comisiones 06-2026 Bcp Dolares.xlsm', eliminar_archivo: bool = False):
     window = app.top_window()
     window.set_focus()
 
@@ -86,11 +86,15 @@ def import_conta(app, archivo='Plantilla comisiones 06-2026 Bcp Dolares.xlsm'):
 
     time.sleep(1)
 
-    ruta_archivo = Path(__file__).parent / archivo
+    if isinstance(archivo, Path):
+        ruta_archivo = archivo.resolve()
+    else:
+        p = Path(archivo)
+        ruta_archivo = p.resolve() if p.is_absolute() else (Path(__file__).parent / p).resolve()
+
     if not ruta_archivo.exists():
         app.kill()
-        raise FileNotFoundError('No se encontró el archivo: ', ruta_archivo)
-
+        raise FileNotFoundError(f'No se encontró el archivo: {ruta_archivo}')
 
     for _ in range(20):
         elementos = findwindows.find_elements(
@@ -123,9 +127,6 @@ def import_conta(app, archivo='Plantilla comisiones 06-2026 Bcp Dolares.xlsm'):
     mensaje = window.child_window(title="Mensaje Sistema", control_type="Window")
     mensaje.wait('ready', timeout=5)
 
-    mensaje = window.child_window(title="Mensaje Sistema", control_type="Window")
-    mensaje.wait('ready', timeout=5)
-
     aceptar = mensaje.child_window(title="Aceptar", control_type="Button")
     aceptar.wait('ready', timeout=5)
     aceptar.click_input()
@@ -146,26 +147,54 @@ def import_conta(app, archivo='Plantilla comisiones 06-2026 Bcp Dolares.xlsm'):
 
     time.sleep(2)
 
-    ruta_archivo.unlink()
-    print('Archivo eliminado ', ruta_archivo)
+    if eliminar_archivo:
+        ruta_archivo.unlink(missing_ok=True)
+        print('Archivo eliminado:', ruta_archivo)
 
     app.kill()
 
 
+def ingresar_asiento_contanet(
+    ruta_archivo: Path | str = 'Plantilla comisiones 06-2026 Bcp Dolares.xlsm',
+    ruc_cliente: str = '20376729126',
+    anio: str = '2024',
+    eliminar_archivo: bool = False,
+) -> bool:
+    """Ejecuta el ingreso automatizado del asiento en Contanet de forma independiente.
+
+    Parameters
+    ----------
+    ruta_archivo : Path | str
+        Ruta del archivo Excel (.xlsm) con el asiento a importar.
+    ruc_cliente : str
+        RUC de la empresa en Contanet.
+    anio : str
+        Año del ejercicio contable.
+    eliminar_archivo : bool
+        Si es True, elimina el archivo tras importarlo con éxito. Por defecto False.
+
+    Returns
+    -------
+    bool
+        True si el proceso se completó con éxito.
+    """
+    app = abrir_app()
+    try:
+        seleccionar_empresa(app, ruc_cliente=ruc_cliente, anio=str(anio))
+        seleccionar_import(app)
+        elegir_procesos(app)
+        import_conta(app, archivo=ruta_archivo, eliminar_archivo=eliminar_archivo)
+        return True
+    except Exception as e:
+        try:
+            app.kill()
+        except Exception:
+            pass
+        raise e
 
 
+if __name__ == '__main__':
+    # Ejecución manual y separada del flujo general
+    print("Iniciando ingreso en Contanet de manera independiente...")
+    ingresar_asiento_contanet()
 
-
-
-
-
-
-abrir = abrir_app()
-
-seleccionar_empresa(abrir)
-
-seleccionar_import(abrir)
-
-elegir_procesos(abrir)
-
-import_conta(abrir)
