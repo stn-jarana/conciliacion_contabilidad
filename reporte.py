@@ -342,10 +342,10 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
     banco_ext['_op_norm'] = _norm_series(banco_ext['Banco - # Operación'])
     conta_ext['_op_norm'] = _norm_series(conta_ext['Conta - # Operación'])
 
-    # Sufijo de 6 dígitos (solo numéricos)
+    # Sufijo numérico: 5 dígitos mínimo (cubre ops alfanuméricas tipo '68478AFB')
     def _sufijo6(norm_op: str) -> str:
         digits = _re_inline.sub(r'\D', '', norm_op)
-        return digits[-6:] if len(digits) >= 6 else ''
+        return digits[-5:] if len(digits) >= 5 else ''
 
     banco_ext['_op_suf6'] = banco_ext['_op_norm'].apply(_sufijo6)
     conta_ext['_op_suf6'] = conta_ext['_op_norm'].apply(_sufijo6)
@@ -430,7 +430,7 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             conta_ext.at[c_idx, '_matched'] = True
             banco_ext.at[b_idx, 'MAR'] = 'X'
             conta_ext.at[c_idx, 'MAR'] = 'X'
-            op_link = op_b or op_c
+            op_link = op_b or op_c or f"AUTO-OP-{b_idx}-{c_idx}"
             banco_ext.at[b_idx, '# Operación2'] = op_link
             conta_ext.at[c_idx, '# Operación2'] = op_link
             banco_ext.at[b_idx, 'Anotación'] = 'Auto: Sufijo de # Operación'
@@ -470,7 +470,7 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             conta_ext.at[c_idx, '_matched'] = True
             banco_ext.at[b_idx, 'MAR'] = 'X'
             conta_ext.at[c_idx, 'MAR'] = 'X'
-            op_link = op_b or op_c
+            op_link = op_b or op_c or f"AUTO-OP-COM-{b_idx}-{c_idx}"
             banco_ext.at[b_idx, '# Operación2'] = op_link
             conta_ext.at[c_idx, '# Operación2'] = op_link
             banco_ext.at[b_idx, 'Anotación'] = 'Auto: Sufijo de # Operación'
@@ -547,6 +547,77 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             conta_ext.at[c_idx, 'Anotación'] = 'Auto: # Operación en Glosa Banco'
 
 
+    # 1.64 Conciliación por token alfanumérico compartido (≥5 chars) entre
+    # la descripción del banco y el Giro/Glosa de contabilidad.
+    # Cubre casos como "BCP.LEA 64298AFB" ↔ "CONTRATO 64298AFB CUOTA 18"
+    # donde el # Operación no coincide pero ambos mencionan el mismo código.
+    #
+    # Requisitos para emparejar:
+    #   1. Monto coincide (valor absoluto, tolerancia 0.01) — cubre cuando
+    #      banco registra negativo y conta tiene el mismo valor absoluto.
+    #   2. Fecha coincide (si ambas están presentes).
+    #   3. Hay exactamente 1 candidato conta con token compartido.
+    #   4. El token compartido es específico: solo letras+dígitos, ≥6 chars,
+    #      no es una palabra genérica (BANCO, CREDITO, LEASING, CONTRATO…).
+
+    _TOKENS_GENERICOS = {
+        'BANCO', 'CREDITO', 'LEASING', 'CONTRATO', 'CUOTA', 'PAGO',
+        'SEGURO', 'INTER', 'DEBITO', 'CUENTA', 'CARGO', 'ABONO',
+        'TRANSFERENCIA', 'OPERACION', 'COMISION', 'MANTENIMIENTO',
+    }
+
+    def _tokens_alfa(texto: str, min_len: int = 6) -> set:
+        """Extrae tokens alfanuméricos específicos (letras+dígitos, ≥min_len chars)."""
+        if not texto:
+            return set()
+        return {
+            t for t in _re_inline.findall(r'[A-Z0-9]{' + str(min_len) + r',}', texto.upper())
+            if any(c.isdigit() for c in t)          # debe tener al menos un dígito
+            and any(c.isalpha() for c in t)          # debe tener al menos una letra
+            and t not in _TOKENS_GENERICOS
+        }
+
+    for b_idx in banco_ext.index[~banco_ext['_matched']]:
+        desc_b = str(banco_ext.at[b_idx, 'Banco - Descripción'] or '').strip()
+        tokens_b = _tokens_alfa(desc_b)
+        if not tokens_b:
+            continue
+        m_b     = abs(banco_ext.at[b_idx, '_monto_r'])   # comparar en valor absoluto
+        f_b     = banco_ext.at[b_idx, 'Fecha']
+
+        candidatos_c = []
+        for c_idx in conta_ext.index[~conta_ext['_matched']]:
+            m_c = abs(conta_ext.at[c_idx, '_monto_r'])   # comparar en valor absoluto
+            if abs(m_b - m_c) > 0.01:
+                continue
+            if m_b == 0:                                   # no emparejar montos cero
+                continue
+            f_c = conta_ext.at[c_idx, 'Fecha']
+            if pd.notna(f_b) and pd.notna(f_c) and f_b != f_c:
+                continue
+            giro  = str(conta_ext.at[c_idx, 'Conta - Giro']  or '').strip()
+            glosa = str(conta_ext.at[c_idx, 'Conta - Glosa'] or '').strip()
+            tokens_c = _tokens_alfa(giro) | _tokens_alfa(glosa)
+            if tokens_b & tokens_c:
+                candidatos_c.append(c_idx)
+
+        if len(candidatos_c) == 1:
+            c_idx = candidatos_c[0]
+            op_b = _normalizar_nro_op(banco_ext.at[b_idx, 'Banco - # Operación'])
+            op_c = _normalizar_nro_op(conta_ext.at[c_idx, 'Conta - # Operación'])
+            if op_b and op_c and op_b == op_c:
+                op_link = op_b
+            else:
+                op_link = f"AUTO-TOK-{b_idx}-{c_idx}"
+            banco_ext.at[b_idx, '_matched'] = True
+            conta_ext.at[c_idx, '_matched'] = True
+            banco_ext.at[b_idx, 'MAR'] = 'X'
+            conta_ext.at[c_idx, 'MAR'] = 'X'
+            banco_ext.at[b_idx, '# Operación2'] = op_link
+            conta_ext.at[c_idx, '# Operación2'] = op_link
+            banco_ext.at[b_idx, 'Anotación'] = 'Auto: Token compartido en descripción'
+            conta_ext.at[c_idx, 'Anotación'] = 'Auto: Token compartido en descripción'
+
     # 1.65 Conciliación por descarte cuando quedan exactamente 1 banco y 1 conta no conciliados
     # con mismo monto y misma fecha (fecha exacta). Cubre el caso donde todos los demás ya
     # fueron emparejados por reglas anteriores y solo queda 1 de cada lado.
@@ -576,8 +647,12 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             if len(idxs_b) == 1 and len(idxs_c) == 1:
                 b_idx = idxs_b[0]
                 c_idx = idxs_c[0]
-                op_b = str(banco_ext.at[b_idx, 'Banco - # Operación']).strip()
-                op_link = op_b if (op_b and op_b != 'nan') else f"AUTO-DESC-{b_idx}"
+                op_b = _normalizar_nro_op(banco_ext.at[b_idx, 'Banco - # Operación'])
+                op_c = _normalizar_nro_op(conta_ext.at[c_idx, 'Conta - # Operación'])
+                if op_b and op_c and op_b == op_c:
+                    op_link = op_b
+                else:
+                    op_link = f"AUTO-DESC-{b_idx}-{c_idx}"
                 banco_ext.at[b_idx, '_matched'] = True
                 conta_ext.at[c_idx, '_matched'] = True
                 banco_ext.at[b_idx, 'MAR'] = 'X'
@@ -608,8 +683,12 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             banco_ext.at[b_idx, 'MAR'] = 'X'
             conta_ext.at[c_idx, 'MAR'] = 'X'
             
-            op_link = str(banco_ext.at[b_idx, 'Banco - # Operación'])
-            if op_link == 'nan' or not op_link.strip(): op_link = f"AUTO-{b_idx}"
+            op_b = _normalizar_nro_op(banco_ext.at[b_idx, 'Banco - # Operación'])
+            op_c = _normalizar_nro_op(conta_ext.at[c_idx, 'Conta - # Operación'])
+            if op_b and op_c and op_b == op_c:
+                op_link = op_b
+            else:
+                op_link = f"AUTO-MF-{b_idx}-{c_idx}"
             banco_ext.at[b_idx, '# Operación2'] = op_link
             conta_ext.at[c_idx, '# Operación2'] = op_link
             
@@ -658,6 +737,81 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
     if '_suggested' not in conta_ext.columns:
         conta_ext['_suggested'] = False
         
+    # 3.9 Sugerencia específica para Haberes / Planillas (N Banco = 1 Conta en misma fecha)
+    # Agrupa múltiples pagos individuales de haberes/sueldos/planillas del banco
+    # que corresponden a una planilla o reintegro global en Contabilidad en la misma fecha.
+    _pat_haberes_b = _re_inline.compile(
+        r'(?i)\b(HABER|HABERES|PLANILLA|PLANILLAS|SUELDO|SUELDOS|GRATIF|GRATIFICAC)\b|HABER\s+TLC',
+    )
+    _pat_haberes_c = _re_inline.compile(
+        r'(?i)\b(HABER|HABERES|PLANILLA|PLANILLAS|SUELDO|SUELDOS|OBRER\w*|EMPLEAD\w*|REMUNERAC\w*|QUINCENA|GRATIF\w*)\b',
+    )
+
+    unm_c_haberes = conta_ext[
+        (~conta_ext['_matched']) &
+        (~conta_ext.get('_suggested', pd.Series([False] * len(conta_ext)))) &
+        (~conta_ext['Anotación'].astype(str).str.startswith('Sugerido'))
+    ]
+
+    for c_idx, row_c in unm_c_haberes.iterrows():
+        txt_c = f"{row_c.get('Conta - Giro', '')} {row_c.get('Conta - Glosa', '')}"
+        if not _pat_haberes_c.search(txt_c):
+            continue
+        m_c = float(row_c.get('Monto-Conta', 0) or 0)
+        if m_c == 0:
+            continue
+        f_c = row_c.get('Fecha')
+        if pd.isna(f_c):
+            continue
+
+        # Buscar en banco movimientos de la misma fecha con descripción de haberes
+        unm_b_hab = banco_ext[
+            (~banco_ext['_matched']) &
+            (~banco_ext['Anotación'].astype(str).str.startswith('Sugerido')) &
+            (banco_ext['Fecha'] == f_c)
+        ]
+        hab_candidates = []
+        for b_idx, row_b in unm_b_hab.iterrows():
+            desc_b = str(row_b.get('Banco - Descripción', '') or '')
+            m_b = float(row_b.get('Monto-Banco', 0) or 0)
+            if (m_b > 0) == (m_c > 0) and _pat_haberes_b.search(desc_b):
+                hab_candidates.append((b_idx, m_b))
+
+        if len(hab_candidates) >= 2:
+            # Caso 1: La suma de todos los candidatos de haberes coincide exactamente
+            suma_todos = round(sum(x[1] for x in hab_candidates), 2)
+            if round(abs(abs(suma_todos) - abs(m_c)), 2) <= 0.01:
+                b_idxs_combo = [x[0] for x in hab_candidates]
+                op_link = f"SUG-HABER-{c_idx}"
+                anot = f"Sugerido: {len(b_idxs_combo)} Banco = 1 Conta (Haberes / Planillas)"
+                conta_ext.at[c_idx, '# Operación2'] = op_link
+                conta_ext.at[c_idx, 'Anotación'] = anot
+                conta_ext.at[c_idx, '_suggested'] = True
+                for b_i in b_idxs_combo:
+                    banco_ext.at[b_i, '# Operación2'] = op_link
+                    banco_ext.at[b_i, 'Anotación'] = anot
+            else:
+                # Caso 2: Un subconjunto de candidatos de haberes suma exactamente m_c
+                valid_hab_combos = []
+                for r_len in range(2, min(len(hab_candidates) + 1, 11)):
+                    for combo in combinations(hab_candidates, r_len):
+                        if round(abs(abs(sum(x[1] for x in combo)) - abs(m_c)), 2) <= 0.01:
+                            valid_hab_combos.append(combo)
+                            if len(valid_hab_combos) > 1:
+                                break
+                    if len(valid_hab_combos) > 1:
+                        break
+                if len(valid_hab_combos) == 1:
+                    b_idxs_combo = [x[0] for x in valid_hab_combos[0]]
+                    op_link = f"SUG-HABER-{c_idx}"
+                    anot = f"Sugerido: {len(b_idxs_combo)} Banco = 1 Conta (Haberes / Planillas)"
+                    conta_ext.at[c_idx, '# Operación2'] = op_link
+                    conta_ext.at[c_idx, 'Anotación'] = anot
+                    conta_ext.at[c_idx, '_suggested'] = True
+                    for b_i in b_idxs_combo:
+                        banco_ext.at[b_i, '# Operación2'] = op_link
+                        banco_ext.at[b_i, 'Anotación'] = anot
+
     # 4. Sumas N a 1 y 1 a N (COMO SUGERENCIAS)
     fechas = set(banco_ext.loc[~banco_ext['_matched'], 'Fecha']).union(
              set(conta_ext.loc[~conta_ext['_matched'], 'Fecha']))
@@ -674,11 +828,10 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             # Solo conciliar con montos del mismo signo (positivo con positivo, negativo con negativo)
             avail_c = [x for x in pool_c if x[0] not in used_c and (x[1] > 0) == (b_amt > 0)]
             # Guard anti-explosión combinatoria: si hay demasiados candidatos por fecha, omitir
-            # (reducido de 25 a 15, y max combo de 4 a 3: C(15,3)=455 vs C(25,4)=12650)
             if len(avail_c) > 15:
                 continue
             valid_combos = []
-            for r in range(2, min(4, len(avail_c) + 1)):
+            for r in range(2, min(6, len(avail_c) + 1)):
                 for combo in combinations(avail_c, r):
                     suma_conta = sum(x[1] for x in combo)
                     diff = round(abs(abs(b_amt) - abs(suma_conta)), 2)
@@ -718,11 +871,10 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             # Solo conciliar con montos del mismo signo (positivo con positivo, negativo con negativo)
             avail_b = [x for x in pool_b2 if x[0] not in used_b and (x[1] > 0) == (c_amt > 0)]
             # Guard anti-explosión combinatoria: si hay demasiados candidatos por fecha, omitir
-            # (reducido de 25 a 15, y max combo de 4 a 3: C(15,3)=455 vs C(25,4)=12650)
             if len(avail_b) > 15:
                 continue
             valid_combos = []
-            for r in range(2, min(4, len(avail_b) + 1)):
+            for r in range(2, min(6, len(avail_b) + 1)):
                 for combo in combinations(avail_b, r):
                     suma_banco = sum(x[1] for x in combo)
                     diff = round(abs(abs(suma_banco) - abs(c_amt)), 2)
@@ -854,7 +1006,10 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
 
             op_b = _normalizar_nro_op(banco_ext.at[b_idx, 'Banco - # Operación'])
             op_c = _normalizar_nro_op(conta_ext.at[c_idx, 'Conta - # Operación'])
-            op_link = op_b or op_c or f"AUTO-TBK-PLAN-{b_idx}"
+            if op_b and op_c and op_b == op_c:
+                op_link = op_b
+            else:
+                op_link = f"AUTO-TBK-PLAN-{b_idx}-{c_idx}"
 
             banco_ext.at[b_idx, '_matched'] = True
             conta_ext.at[c_idx, '_matched'] = True
@@ -1749,15 +1904,33 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
     b_unmatch = banco_ext[banco_ext['MAR'] != 'X'].copy()
     c_unmatch = conta_ext[conta_ext['MAR'] != 'X'].copy()
 
+    # Asegurar que todas las filas conciliadas tengan un identificador de enlace válido
+    for b_i in b_match.index:
+        v = str(b_match.at[b_i, '# Operación2'] or '').strip()
+        if not v or v in ('0', '0.0', 'nan', 'None'):
+            b_match.at[b_i, '# Operación2'] = f"AUTO-MAR-B{b_i}"
+    for c_i in c_match.index:
+        v = str(c_match.at[c_i, '# Operación2'] or '').strip()
+        if not v or v in ('0', '0.0', 'nan', 'None'):
+            c_match.at[c_i, '# Operación2'] = f"AUTO-MAR-C{c_i}"
+
     # Fusionar filas conciliadas lado a lado
     matched_rows = []
     grupos = pd.unique(pd.concat([b_match['# Operación2'], c_match['# Operación2']]))
     for g in grupos:
-        if str(g) == 'nan' or not str(g).strip(): 
+        if str(g) == 'nan' or not str(g).strip() or str(g).strip() in ('0', '0.0'): 
             continue
         bg = b_match[b_match['# Operación2'] == g].reset_index(drop=True)
         cg = c_match[c_match['# Operación2'] == g].reset_index(drop=True)
         
+        # Si un grupo tiene múltiples filas en ambos lados, ordenar por monto absoluto
+        # para asegurar que los importes coincidentes queden exactamente frente a frente
+        if len(bg) > 1 and len(cg) > 1:
+            bg['_m_abs_sort'] = bg['Monto-Banco'].fillna(0).abs().round(2)
+            cg['_m_abs_sort'] = cg['Monto-Conta'].fillna(0).abs().round(2)
+            bg = bg.sort_values(by=['_m_abs_sort', 'Fecha']).drop(columns=['_m_abs_sort']).reset_index(drop=True)
+            cg = cg.sort_values(by=['_m_abs_sort', 'Fecha']).drop(columns=['_m_abs_sort']).reset_index(drop=True)
+
         n = max(len(bg), len(cg))
         for i in range(n):
             row = {}
@@ -1780,7 +1953,7 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
             op_banco = row.get('Banco - # Operación')
             
             def is_valid_op(v):
-                return pd.notna(v) and str(v) != 'nan' and str(v).strip() != '' and str(v).strip() != '0'
+                return pd.notna(v) and str(v) != 'nan' and str(v).strip() != '' and str(v).strip() not in ('0', '0.0')
                 
             if not is_valid_op(op_conta) and is_valid_op(op_banco):
                 row['Conta - # Operación'] = op_banco
@@ -1970,16 +2143,15 @@ def _preparar_anexar1(tab_banco: pd.DataFrame, tab_conta: pd.DataFrame, moneda: 
     op2_vals = anexar['# Operación2'].astype(str)
     anexar['_op2_sort'] = op2_vals.where(orden == 1, '')
 
-    # monto_abs para ordenar no conciliados de mayor a menor
-    mb_num = pd.to_numeric(anexar['Monto-Banco'], errors='coerce').fillna(0.0).abs()
-    mc_num = pd.to_numeric(anexar['Monto-Conta'], errors='coerce').fillna(0.0).abs()
-    monto_abs = mb_num.combine(mc_num, max)
-    anexar['_monto_abs'] = monto_abs
-    anexar['_monto_sort'] = monto_abs.where(orden == 2, 0.0).mul(-1)
+    # fecha_sort: para el bloque 2 (no conciliados ni sugeridos) se ordena por fecha asc;
+    # para el resto se usa una fecha nula que no interfiere con su orden propio.
+    fecha_num = pd.to_datetime(anexar['Fecha'], dayfirst=True, errors='coerce')
+    anexar['_fecha_sort'] = fecha_num.where(orden == 2, pd.NaT)
 
     anexar = anexar.sort_values(
-        by=['_orden_conciliado', '_op2_sort', '_monto_sort', 'Fecha']
-    ).drop(columns=['_orden_conciliado', '_op2_sort', '_monto_abs', '_monto_sort']).reset_index(drop=True)
+        by=['_orden_conciliado', '_op2_sort', '_fecha_sort', 'Fecha'],
+        na_position='last'
+    ).drop(columns=['_orden_conciliado', '_op2_sort', '_fecha_sort']).reset_index(drop=True)
 
     return anexar
 

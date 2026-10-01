@@ -731,18 +731,37 @@ def _clasificar_partidas(
     )
 
     # Partidas bancarias sin par contable
+    # ── Excluir filas clasificadas como ITF o Comisiones para evitar duplicados ──
+    # Esas filas tienen su propio bloque en la conciliación final.
+    _col_itf_filt = 'ITF'        if 'ITF'        in banco_sin_marcar.columns else None
+    _col_com_filt = 'Comisiones' if 'Comisiones' in banco_sin_marcar.columns else None
+
+    def _es_itf_o_com(row) -> bool:
+        def _marcado_filt(col):
+            if col is None:
+                return False
+            v = row.get(col)
+            return pd.notna(v) and str(v).strip().upper() == 'X'
+        return _marcado_filt(_col_itf_filt) or _marcado_filt(_col_com_filt)
+
+    if _col_itf_filt or _col_com_filt:
+        _mask_itf_com = banco_sin_marcar.apply(_es_itf_o_com, axis=1)
+        banco_sin_marcar_ext = banco_sin_marcar[~_mask_itf_com].copy()
+    else:
+        banco_sin_marcar_ext = banco_sin_marcar
+
     abonos_ext_no_lib = to_lista(
-        banco_sin_marcar, 'Monto-Banco', 'Fecha',
+        banco_sin_marcar_ext, 'Monto-Banco', 'Fecha',
         'Banco - Descripción', 'Banco - # Operación', positivo=True
     )
     cargos_ext_no_lib = to_lista(
-        banco_sin_marcar, 'Monto-Banco', 'Fecha',
+        banco_sin_marcar_ext, 'Monto-Banco', 'Fecha',
         'Banco - Descripción', 'Banco - # Operación', positivo=False, mantener_signo=True
     )
 
     # Para el formato estándar: todas las partidas de cada categoría
     solo_banco_todas = todas(
-        banco_sin_marcar, 'Monto-Banco', 'Fecha',
+        banco_sin_marcar_ext, 'Monto-Banco', 'Fecha',
         'Banco - Descripción', 'Banco - # Operación'
     )
     solo_conta_todas = todas(
@@ -1568,6 +1587,122 @@ def _escribir_hoja_conciliacion_final(
     fila += 1
     ws.row_dimensions[fila].height = 15
     fila += 1
+
+    # Fila espaciadora
+    ws.row_dimensions[fila].height = 10
+    fila += 1
+
+    # ══════════════════════════════════════════════════════════════════
+    # BLOQUE: ITF
+    # ══════════════════════════════════════════════════════════════════
+    itf_lista = partidas.get('itf_banco', [])
+    total_itf  = sum(p['monto'] for p in itf_lista)
+
+    # Título de sección ITF
+    ws.row_dimensions[fila].height = 18
+    _c(ws, fila, 2, 'ITF', bold=True, size=11,
+       color=_COLOR_WHITE, bg='C00000', align_h='center', border=_BORDE_THIN)
+    _merge(ws, fila, 2, fila, 8)
+    fila += 1
+
+    if itf_lista:
+        # Cabecera de tabla
+        ws.row_dimensions[fila].height = 16
+        for col_idx, label in enumerate(['FECHA', 'N° OPERACIÓN', 'DESCRIPCIÓN', '', '', 'MONTO', ''], start=2):
+            _c(ws, fila, col_idx, label if label else None,
+               bold=True, size=10, color=_COLOR_WHITE, bg='C00000',
+               align_h='center', border=_BORDE_THIN)
+        fila += 1
+
+        fila_itf_inicio = fila
+        for p in itf_lista:
+            ws.row_dimensions[fila].height = 15
+            fecha_val = p['fecha']
+            if isinstance(fecha_val, datetime):
+                fecha_str = fecha_val.strftime('%d/%m/%Y')
+            else:
+                fecha_str = str(fecha_val) if fecha_val else ''
+            _c(ws, fila, 2, fecha_str, size=10, bold=True)
+            _c(ws, fila, 3, p.get('operacion', ''), size=10, align_h='center')
+            _c(ws, fila, 4, p.get('descripcion', ''), size=10, wrap=True)
+            _merge(ws, fila, 4, fila, 6)
+            _c(ws, fila, 7, p['monto'], size=10, align_h='right', num_fmt='#,##0.00')
+            fila += 1
+
+        # Subtotal ITF
+        ws.row_dimensions[fila].height = 15
+        _c(ws, fila, 2, 'TOTAL ITF', bold=True, size=10,
+           bg=_COLOR_TOTAL, border=_BORDE_THIN)
+        _merge(ws, fila, 2, fila, 6)
+        _c(ws, fila, 7, None, bg=_COLOR_TOTAL, border=_BORDE_THIN)
+        _c(ws, fila, 8, total_itf, bold=True, size=10, align_h='right',
+           bg=_COLOR_TOTAL, num_fmt='#,##0.00', border=_BORDE_THIN)
+        fila += 1
+    else:
+        # Sin datos: mostrar fila vacía
+        ws.row_dimensions[fila].height = 15
+        _c(ws, fila, 2, '(sin movimientos de ITF)', size=10, italic=True,
+           color='7F7F7F', border=_BORDE_THIN)
+        _merge(ws, fila, 2, fila, 8)
+        fila += 1
+
+    # Fila espaciadora
+    ws.row_dimensions[fila].height = 8
+    fila += 1
+
+    # ══════════════════════════════════════════════════════════════════
+    # BLOQUE: COMISIONES
+    # ══════════════════════════════════════════════════════════════════
+    com_lista = partidas.get('comisiones_banco', [])
+    total_com  = sum(p['monto'] for p in com_lista)
+
+    # Título de sección Comisiones
+    ws.row_dimensions[fila].height = 18
+    _c(ws, fila, 2, 'COMISIONES', bold=True, size=11,
+       color=_COLOR_WHITE, bg='ED7D31', align_h='center', border=_BORDE_THIN)
+    _merge(ws, fila, 2, fila, 8)
+    fila += 1
+
+    if com_lista:
+        # Cabecera de tabla
+        ws.row_dimensions[fila].height = 16
+        for col_idx, label in enumerate(['FECHA', 'N° OPERACIÓN', 'DESCRIPCIÓN', '', '', 'MONTO', ''], start=2):
+            _c(ws, fila, col_idx, label if label else None,
+               bold=True, size=10, color=_COLOR_WHITE, bg='ED7D31',
+               align_h='center', border=_BORDE_THIN)
+        fila += 1
+
+        fila_com_inicio = fila
+        for p in com_lista:
+            ws.row_dimensions[fila].height = 15
+            fecha_val = p['fecha']
+            if isinstance(fecha_val, datetime):
+                fecha_str = fecha_val.strftime('%d/%m/%Y')
+            else:
+                fecha_str = str(fecha_val) if fecha_val else ''
+            _c(ws, fila, 2, fecha_str, size=10, bold=True)
+            _c(ws, fila, 3, p.get('operacion', ''), size=10, align_h='center')
+            _c(ws, fila, 4, p.get('descripcion', ''), size=10, wrap=True)
+            _merge(ws, fila, 4, fila, 6)
+            _c(ws, fila, 7, p['monto'], size=10, align_h='right', num_fmt='#,##0.00')
+            fila += 1
+
+        # Subtotal Comisiones
+        ws.row_dimensions[fila].height = 15
+        _c(ws, fila, 2, 'TOTAL COMISIONES', bold=True, size=10,
+           bg=_COLOR_TOTAL, border=_BORDE_THIN)
+        _merge(ws, fila, 2, fila, 6)
+        _c(ws, fila, 7, None, bg=_COLOR_TOTAL, border=_BORDE_THIN)
+        _c(ws, fila, 8, total_com, bold=True, size=10, align_h='right',
+           bg=_COLOR_TOTAL, num_fmt='#,##0.00', border=_BORDE_THIN)
+        fila += 1
+    else:
+        # Sin datos: mostrar fila vacía
+        ws.row_dimensions[fila].height = 15
+        _c(ws, fila, 2, '(sin movimientos de comisiones)', size=10, italic=True,
+           color='7F7F7F', border=_BORDE_THIN)
+        _merge(ws, fila, 2, fila, 8)
+        fila += 1
 
     # Fila espaciadora
     ws.row_dimensions[fila].height = 10

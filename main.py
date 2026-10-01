@@ -739,7 +739,7 @@ def flujo_reporte_inicial(config: dict) -> None:
     if not filas_saldo_texto.empty:
         try:
             texto = str(filas_saldo_texto['nro_registro'].iloc[0])
-            m = _re.search(r':\s*([\d,\.]+)', texto)
+            m = _re.search(r':\s*(-?[\d,\.]+)', texto)
             if m:
                 saldo_contable_final = float(m.group(1).replace(',', ''))
         except Exception:
@@ -755,7 +755,7 @@ def flujo_reporte_inicial(config: dict) -> None:
             if not _filas.empty:
                 try:
                     texto = str(_filas[_col_raw].iloc[0])
-                    m = _re.search(r':\s*([\d,\.]+)', texto)
+                    m = _re.search(r':\s*(-?[\d,\.]+)', texto)
                     if m:
                         saldo_contable_final = float(m.group(1).replace(',', ''))
                         break
