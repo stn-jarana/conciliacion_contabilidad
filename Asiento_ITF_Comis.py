@@ -366,6 +366,21 @@ def _buscar_fila_encabezados_destino(hoja: Worksheet) -> tuple[int, dict[str, in
         "monto_haber_me": ("Monto Haber ME",),
         "cambio_moneda": ("Cambio Moneda",),
     }
+    centros_costo: dict[str, tuple[str, ...]] = {
+        "cod_centro": (
+            "Cod. Centro", "Cod Centro", "Cod. Centro C.", "Cod Centro C",
+            "Codigo Centro Costo", "Código Centro Costo", "Codigo Centro", "Código Centro",
+            "Cod. Centro Costo", "Cod Centro Costo", "Centro Costo", "Centro de Costo",
+        ),
+        "cod_sub_centro": (
+            "Cod. Sub. Centro", "Cod Sub Centro", "Cod. Sub Centro",
+            "Cod. Sub. Centro C.", "Cod Sub Centro C", "Cod. Sub Centro C",
+            "Codigo Sub Centro Costo", "Código Sub Centro Costo",
+            "Codigo Sub Centro", "Código Sub Centro",
+            "Cod. Sub. Centro Costo", "Cod Sub Centro Costo",
+            "Sub Centro Costo", "Sub Centro",
+        ),
+    }
 
     for numero_fila in range(1, min(hoja.max_row, 30) + 1):
         hallados: dict[str, int] = {}
@@ -376,6 +391,24 @@ def _buscar_fila_encabezados_destino(hoja: Worksheet) -> tuple[int, dict[str, in
                     hallados[clave] = numero_columna
                     break
         if set(requeridos) <= set(hallados):
+            # Buscar columnas de Centro y Sub Centro de Costo (ej. Cod. Centro C. / Codigo Centro Costo)
+            for clave, alias in centros_costo.items():
+                if clave not in hallados:
+                    for fila_chk in (numero_fila, numero_fila - 1, numero_fila - 2, numero_fila + 1):
+                        if 1 <= fila_chk <= hoja.max_row:
+                            for numero_columna in range(1, hoja.max_column + 1):
+                                valor = hoja.cell(fila_chk, numero_columna).value
+                                if _encabezado_equivale(valor, *alias):
+                                    hallados[clave] = numero_columna
+                                    break
+                            if clave in hallados:
+                                break
+            # Fallback a posiciones estándar en plantilla Contanet si no se ubicaron por encabezado
+            if "cod_centro" not in hallados and hoja.max_column >= 20:
+                hallados["cod_centro"] = 20
+            if "cod_sub_centro" not in hallados and hoja.max_column >= 21:
+                hallados["cod_sub_centro"] = 21
+
             return numero_fila, hallados
 
     faltantes = ", ".join(requeridos)
@@ -413,6 +446,55 @@ def _limpiar_importacion(hoja: Worksheet, primera_fila_a_eliminar: int) -> None:
         )
 
 
+_ALIAS_EMPRESA: dict[str, tuple[str, ...]] = {
+    "THIMBLE": (
+        "THIMBLE", "TST", "THIMBLE SOURCING",
+        "THIMBLE SOURCING / TST", "THIMBLE SOURCING/TST",
+        "THIMBLE SOURCING_TST", "THIMBLE_SOURCING_TST",
+    ),
+    "STN": ("STN", "SOUTHERN TEXTIL", "SOUTHERN", "SOUTHERN_TEXTIL"),
+    "CMT": ("CMT", "CMT DEL SUR", "CMT_DEL_SUR"),
+    "ITS": ("ITS", "INTEGRATED TEXTILE", "INTEGRATED_TEXTILE"),
+}
+
+
+def _resolver_clave_empresa(
+    empresa: str | None, empresas_disponibles: Iterable[str]
+) -> str | None:
+    """Resuelve la clave de empresa en el JSON a partir de cualquier variante o alias."""
+    if not empresa:
+        return None
+    emp_upper = _normalizar(empresa).upper()
+    empresas_list = list(empresas_disponibles)
+
+    # 1. Coincidencia exacta insensible a mayúsculas
+    for emp_clave in empresas_list:
+        if emp_clave.upper() == emp_upper:
+            return emp_clave
+
+    # 2. Coincidencia por alias conocidos
+    for emp_clave, alias_list in _ALIAS_EMPRESA.items():
+        for alias in alias_list:
+            norm_alias = _normalizar(alias).upper()
+            if norm_alias == emp_upper or norm_alias in emp_upper or emp_upper in norm_alias:
+                for candidata in empresas_list:
+                    if candidata.upper() == emp_clave:
+                        return candidata
+
+    # 3. Substring: si el nombre clave está dentro del nombre dado (ej. "THIMBLE" en "THIMBLE SOURCING / TST")
+    for emp_clave in empresas_list:
+        if emp_clave.upper() in emp_upper:
+            return emp_clave
+
+    # 4. Token matching: si algún token del nombre coincide con la clave
+    tokens = [t for t in re.split(r"[_\W]+", emp_upper) if len(t) >= 2]
+    for emp_clave in empresas_list:
+        if any(t == emp_clave.upper() for t in tokens):
+            return emp_clave
+
+    return None
+
+
 def _cuentas_para(
     banco: str,
     moneda: str,
@@ -435,70 +517,87 @@ def _cuentas_para(
     cuentas_personalizadas:
         Mapa opcional con la misma estructura que ``CUENTAS``.
     empresa:
-        Abreviatura de la empresa (ej. ``"STN"``, ``"CMT"``). Si se
-        indica, se busca en ``cuentas_banco.json`` antes del fallback.
+        Abreviatura o nombre de la empresa (ej. ``"STN"``, ``"CMT"``,
+        ``"Thimble Sourcing / TST"``). Si se indica, se busca en
+        ``cuentas_banco.json`` antes del fallback.
     """
     banco_normalizado = _normalizar_banco(banco)
     moneda_normalizada = _normalizar_moneda(moneda)
 
-    # ── 1. cuentas_personalizadas (compatibilidad) ────────────────────────
+    # ── 1. Buscar configuración en cuentas_banco.json por empresa ─────────
+    clave_empresa = None
+    cfg_empresa = None
+    cc_empresa = ""
+    scc_empresa = ""
+    if empresa:
+        datos_json = cargar_cuentas_banco()
+        empresas_json: dict = datos_json.get("empresas", {})
+        clave_empresa = _resolver_clave_empresa(empresa, empresas_json.keys())
+        if clave_empresa:
+            cfg_empresa = empresas_json.get(clave_empresa)
+            if cfg_empresa is not None:
+                cc_empresa = str(cfg_empresa.get("CC") or cfg_empresa.get("cc") or "").strip()
+                scc_empresa = str(cfg_empresa.get("SCC") or cfg_empresa.get("scc") or "").strip()
+        else:
+            raise ErrorAsientoITFComisiones(
+                f"Empresa {empresa!r} no encontrada en cuentas_banco.json. "
+                f"Empresas registradas: {list(empresas_json.keys())}"
+            )
+
+    # ── 2. cuentas_personalizadas (compatibilidad) ────────────────────────
     if cuentas_personalizadas is not None:
         cuentas = cuentas_personalizadas.get((banco_normalizado, moneda_normalizada))
         if cuentas is not None:
-            return _validar_y_extraer_cuentas(cuentas, banco_normalizado, moneda_normalizada)
+            return _validar_y_extraer_cuentas(
+                cuentas, banco_normalizado, moneda_normalizada, cc=cc_empresa, scc=scc_empresa
+            )
 
-    # ── 2. cuentas_banco.json (fuente principal) ──────────────────────────
-    if empresa:
-        datos_json = cargar_cuentas_banco()
-        empresa_upper = empresa.strip().upper()
-        # Intentar coincidencia exacta primero; luego búsqueda insensible a mayúsculas
-        empresas_json: dict = datos_json.get("empresas", {})
-        cfg_empresa = empresas_json.get(empresa_upper) or next(
-            (v for k, v in empresas_json.items() if k.upper() == empresa_upper), None
-        )
-        if cfg_empresa is not None:
-            # El JSON usa bancos normalizados: BCP, SCOTIABANK, BN.
-            # _normalizar_banco devuelve "SCOTIA" pero el JSON puede tener "SCOTIABANK".
-            # Se prueban todos los alias para garantizar la coincidencia.
-            _ALIAS_BANCO: dict[str, tuple[str, ...]] = {
-                "SCOTIA": ("SCOTIABANK", "SCOTIBANK", "SCOTIA"),
-                "SCOTIABANK": ("SCOTIABANK", "SCOTIBANK", "SCOTIA"),
-            }
-            claves_banco = _ALIAS_BANCO.get(banco_normalizado, (banco_normalizado,))
-            cfg_banco = None
-            for clave_banco_json in claves_banco:
-                cfg_banco = cfg_empresa.get(clave_banco_json)
-                if cfg_banco is not None:
-                    break
+    # ── 3. cuentas_banco.json (fuente principal) ──────────────────────────
+    if cfg_empresa is not None:
+        # El JSON usa bancos normalizados: BCP, SCOTIABANK, BN.
+        # _normalizar_banco devuelve "SCOTIA" pero el JSON puede tener "SCOTIABANK".
+        # Se prueban todos los alias para garantizar la coincidencia.
+        _ALIAS_BANCO: dict[str, tuple[str, ...]] = {
+            "SCOTIA": ("SCOTIABANK", "SCOTIBANK", "SCOTIA"),
+            "SCOTIABANK": ("SCOTIABANK", "SCOTIBANK", "SCOTIA"),
+        }
+        claves_banco = _ALIAS_BANCO.get(banco_normalizado, (banco_normalizado,))
+        cfg_banco = None
+        for clave_banco_json in claves_banco:
+            cfg_banco = cfg_empresa.get(clave_banco_json)
             if cfg_banco is not None:
-                cfg = cfg_banco.get(moneda_normalizada)  # "MN" o "ME"
-                if cfg is not None:
-                    cuenta_comision = cfg.get("cuenta_comision", "")
-                    cuenta_itf = cfg.get("cuenta_itf", "")
-                    cuenta_cce = cfg.get("cuenta_cce", "")  # puede no existir (Scotiabank)
-                    cuenta_banco = cfg.get("cuenta_banco", "")
-                    faltantes = [
-                        nombre for nombre, valor in {
-                            "cuenta_comision": cuenta_comision,
-                            "cuenta_itf": cuenta_itf,
-                            "cuenta_banco": cuenta_banco,
-                        }.items()
-                        if not str(valor or "").strip()
-                    ]
-                    if faltantes:
-                        raise ErrorAsientoITFComisiones(
-                            f"Faltan cuentas en cuentas_banco.json para "
-                            f"empresa={empresa_upper!r}, banco={banco_normalizado!r}, "
-                            f"moneda={moneda_normalizada!r}: " + ", ".join(faltantes)
-                        )
-                    return {
-                        "empresa": cuenta_comision,        # cuenta de gasto de comisión
-                        "empresa_itf": cuenta_itf,         # cuenta de gasto de ITF
-                        "empresa_cce": cuenta_cce,         # cuenta de gasto CCE (puede vacío)
-                        "banco": cuenta_banco,             # cuenta bancaria (haber)
-                    }
+                break
+        if cfg_banco is not None:
+            cfg = cfg_banco.get(moneda_normalizada)  # "MN" o "ME"
+            if cfg is not None:
+                cuenta_comision = cfg.get("cuenta_comision", "")
+                cuenta_itf = cfg.get("cuenta_itf", "")
+                cuenta_cce = cfg.get("cuenta_cce", "")  # puede no existir (Scotiabank)
+                cuenta_banco = cfg.get("cuenta_banco", "")
+                faltantes = [
+                    nombre for nombre, valor in {
+                        "cuenta_comision": cuenta_comision,
+                        "cuenta_itf": cuenta_itf,
+                        "cuenta_banco": cuenta_banco,
+                    }.items()
+                    if not str(valor or "").strip()
+                ]
+                if faltantes:
+                    raise ErrorAsientoITFComisiones(
+                        f"Faltan cuentas en cuentas_banco.json para "
+                        f"empresa={clave_empresa!r}, banco={banco_normalizado!r}, "
+                        f"moneda={moneda_normalizada!r}: " + ", ".join(faltantes)
+                    )
+                return {
+                    "empresa": cuenta_comision,        # cuenta de gasto de comisión
+                    "empresa_itf": cuenta_itf,         # cuenta de gasto de ITF
+                    "empresa_cce": cuenta_cce,         # cuenta de gasto CCE (puede vacío)
+                    "banco": cuenta_banco,             # cuenta bancaria (haber)
+                    "cc": cc_empresa,                  # Código Centro de Costo
+                    "scc": scc_empresa,                # Código Sub Centro de Costo
+                }
 
-    # ── 3. Fallback al dict CUENTAS hardcodeado ───────────────────────────
+    # ── 4. Fallback al dict CUENTAS hardcodeado ───────────────────────────
     cuentas_fallback = CUENTAS.get((banco_normalizado, moneda_normalizada))
     if cuentas_fallback is None:
         # Intentar alias SCOTIA → SCOTIABANK
@@ -513,13 +612,17 @@ def _cuentas_para(
             f"banco={banco_normalizado!r}, moneda={moneda_normalizada!r}. "
             f"Agregue la empresa/banco al archivo cuentas_banco.json."
         )
-    return _validar_y_extraer_cuentas(cuentas_fallback, banco_normalizado, moneda_normalizada)
+    return _validar_y_extraer_cuentas(
+        cuentas_fallback, banco_normalizado, moneda_normalizada, cc=cc_empresa, scc=scc_empresa
+    )
 
 
 def _validar_y_extraer_cuentas(
     cuentas: Mapping[str, str],
     banco_normalizado: str,
     moneda_normalizada: str,
+    cc: str = "",
+    scc: str = "",
 ) -> Mapping[str, str]:
     """Valida que el mapa de cuentas tenga los campos obligatorios y los normaliza."""
     empresa_itf = cuentas.get("empresa_itf") or cuentas.get("empresa-ITF")
@@ -543,6 +646,8 @@ def _validar_y_extraer_cuentas(
         "empresa_itf": str(empresa_itf),
         "empresa_cce": str(cuentas.get("empresa_cce", cuentas.get("empresa", ""))),
         "banco": str(cuentas["banco"]),
+        "cc": str(cuentas.get("cc") or cuentas.get("CC") or cc or ""),
+        "scc": str(cuentas.get("scc") or cuentas.get("SCC") or scc or ""),
     }
 
 
@@ -633,6 +738,8 @@ def _escribir_fila(
     glosa: str,
     montos: Mapping[str, Decimal],
     tc_venta: Decimal,
+    cod_centro: str = "",
+    cod_sub_centro: str = "",
 ) -> None:
     """Escribe únicamente los campos variables definidos por la regla contable."""
     valores: dict[str, Any] = {
@@ -653,6 +760,11 @@ def _escribir_fila(
         "monto_haber_me": montos["monto_haber_me"],
         "cambio_moneda": tc_venta,
     }
+    if cod_centro and "cod_centro" in columnas:
+        valores["cod_centro"] = cod_centro
+    if cod_sub_centro and "cod_sub_centro" in columnas:
+        valores["cod_sub_centro"] = cod_sub_centro
+
     for campo, valor in valores.items():
         hoja.cell(fila, columnas[campo]).value = valor
 
@@ -681,16 +793,27 @@ def generar_asientos_itf_comisiones(
     empresa:
         Abreviatura de la empresa (ej. ``"STN"``, ``"CMT"``). Se usa para
         buscar las cuentas contables en ``cuentas_banco.json``. Si no se
-        indica, se utilizan las cuentas del diccionario ``CUENTAS`` (fallback).
+        indica, se intentará detectar desde el nombre del archivo o se
+        utilizan las cuentas del diccionario ``CUENTAS`` (fallback).
     """
     ruta_final = Path(ruta_conciliacion_final).expanduser().resolve()
     plantilla = Path(ruta_plantilla).expanduser().resolve()
     if not plantilla.is_file():
         raise FileNotFoundError(f"No existe la plantilla: {plantilla}")
 
+    # Resolver o auto-detectar empresa usando el catálogo de cuentas_banco.json
+    datos_json = cargar_cuentas_banco()
+    empresas_registradas = list(datos_json.get("empresas", {}).keys())
+    if not empresa:
+        empresa = _resolver_clave_empresa(ruta_final.stem, empresas_registradas)
+    else:
+        empresa = _resolver_clave_empresa(empresa, empresas_registradas) or empresa
+
     movimientos = leer_movimientos_itf_comisiones(ruta_final)
     moneda_normalizada = _normalizar_moneda(moneda)
     cuentas = _cuentas_para(banco, moneda_normalizada, cuentas_personalizadas, empresa=empresa)
+    cod_centro = cuentas.get("cc") or ""
+    cod_sub_centro = cuentas.get("scc") or ""
 
     cierres = {ultimo_dia_mes(movimiento.fecha) for movimiento in movimientos}
     if len(cierres) > 1 and not callable(tipo_cambio_venta) and not isinstance(tipo_cambio_venta, Mapping):
@@ -732,6 +855,13 @@ def generar_asientos_itf_comisiones(
         # eliminan las filas de ejemplo restantes. Antes de escribir en ella,
         # se replica su contenido/formato para todos los asientos necesarios.
         _limpiar_importacion(hoja, fila_modelo + 1)
+
+        # Actualizar fila modelo con los centros de costo de la empresa si existen
+        if cod_centro and "cod_centro" in columnas:
+            hoja.cell(fila_modelo, columnas["cod_centro"]).value = cod_centro
+        if cod_sub_centro and "cod_sub_centro" in columnas:
+            hoja.cell(fila_modelo, columnas["cod_sub_centro"]).value = cod_sub_centro
+
         cantidad_filas = len(movimientos) * 2
         for fila in range(fila_modelo + 1, fila_modelo + cantidad_filas):
             _copiar_fila_modelo(hoja, fila_modelo, fila)
@@ -766,6 +896,8 @@ def generar_asientos_itf_comisiones(
                 glosa=movimiento.descripcion,
                 montos=montos_empresa,
                 tc_venta=tc_venta,
+                cod_centro=cod_centro,
+                cod_sub_centro=cod_sub_centro,
             )
             fila_destino += 1
 
@@ -781,6 +913,8 @@ def generar_asientos_itf_comisiones(
                 glosa=movimiento.descripcion,
                 montos=montos_banco,
                 tc_venta=tc_venta,
+                cod_centro=cod_centro,
+                cod_sub_centro=cod_sub_centro,
             )
             fila_destino += 1
 
@@ -854,6 +988,10 @@ def _crear_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--salida", help="Ruta del .xlsx/.xlsm a generar.")
+    parser.add_argument(
+        "--empresa",
+        help="Abreviatura de la empresa (ej. STN, CMT, ITS, THIMBLE).",
+    )
     return parser
 
 
@@ -868,6 +1006,7 @@ def main() -> int:
             moneda=argumentos.moneda,
             tipo_cambio_venta=_parsear_tipos_cambio(argumentos.tc_venta),
             ruta_salida=argumentos.salida,
+            empresa=argumentos.empresa,
         )
     except (ErrorAsientoITFComisiones, FileNotFoundError, PermissionError) as exc:
         print(f"Error: {exc}")

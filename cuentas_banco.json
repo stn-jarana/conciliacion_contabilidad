@@ -21,11 +21,15 @@
       "cuenta_comision": "Cuenta DEBE para COMISION/PORTES",
       "cuenta_itf": "Cuenta DEBE para ITF",
       "cuenta_cce": "Cuenta DEBE para TRANFERENCIA CCE (si aplica)",
-      "cuenta_banco": "Cuenta HABER (cuenta bancaria en contabilidad)"
+      "cuenta_banco": "Cuenta HABER (cuenta bancaria en contabilidad)",
+      "CC": "Código Centro de Costo (Cod. Centro)",
+      "SCC": "Código Sub Centro de Costo (Cod. Sub. Centro)"
     }
   },
   "empresas": {
     "STN": {
+      "CC": "12000",
+      "SCC": "12007",
       "BCP": {
         "ME": {
           "moneda": "DOLARES",
@@ -62,6 +66,8 @@
       }
     },
     "CMT": {
+      "CC": "33000",
+      "SCC": "33002",
       "BCP": {
         "ME": {
           "moneda": "DOLARES",
@@ -98,6 +104,8 @@
       }
     },
     "ITS": {
+      "CC": "20000",
+      "SCC": "20001",
       "BCP": {
         "MN": {
           "moneda": "SOLES",
@@ -118,6 +126,8 @@
       }
     },
     "THIMBLE": {
+      "CC": "20000",
+      "SCC": "20003",
       "BCP": {
         "MN": {
           "moneda": "SOLES",
