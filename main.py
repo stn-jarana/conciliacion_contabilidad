@@ -144,7 +144,7 @@ EMPRESAS = [
     },
     {
         "nombre"  : "ITS",
-        "ruc"     : "20601910603",
+        "ruc"     : "20504334041",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": ("ITS DOL", "ITS USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
             {"nombre": "Soles (PEN)",   "sheet_bank": ("ITS SOL", "ITS SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
@@ -152,7 +152,7 @@ EMPRESAS = [
     },
     {
         "nombre"  : "CMT",
-        "ruc"     : "20537658471",
+        "ruc"     : "20506883301",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": ("CMT DOL", "CMT USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
             {"nombre": "Soles (PEN)",   "sheet_bank": ("CMT SOL", "CMT SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True,
@@ -161,7 +161,7 @@ EMPRESAS = [
     },
     {
         "nombre"  : "Dynamitex",
-        "ruc"     : "20600995761",
+        "ruc"     : "20514016624",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": ("DYNAMITEX DOL", "DYNAMITEX USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
             {"nombre": "Soles (PEN)",   "sheet_bank": ("DYNAMITEX SOL", "DYNAMITEX SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
@@ -169,7 +169,7 @@ EMPRESAS = [
     },
     {
         "nombre"  : "DINSURA",
-        "ruc"     : "20603964571",
+        "ruc"     : "20494530865",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": ("DINSURA DOL", "DINSURA USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
             {"nombre": "Soles (PEN)",   "sheet_bank": ("DINSURA SOL", "DINSURA SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
@@ -177,14 +177,14 @@ EMPRESAS = [
     },
     {
         "nombre"  : "Perú Commerce",
-        "ruc"     : "20601234567",
+        "ruc"     : "20606955724",
         "monedas" : [
             {"nombre": "Soles (PEN)",   "sheet_bank": ("P.COMMERCE", "P.COMMERCE SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "INFOSUR",
-        "ruc"     : "20600567890",
+        "ruc"     : "20490242407",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": ("INFOSUR DOL", "INFOSUR USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
             {"nombre": "Soles (PEN)",   "sheet_bank": ("INFOSUR SOL", "INFOSUR SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
@@ -192,7 +192,7 @@ EMPRESAS = [
     },
     {
         "nombre"  : "Thimble Sourcing / TST",
-        "ruc"     : "20601987654",
+        "ruc"     : "20503682118",
         "monedas" : [
             {"nombre": "Dolares (USD)", "sheet_bank": ("Thimble DOL", "Thimble USD"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
             {"nombre": "Soles (PEN)",   "sheet_bank": ("Thimble", "Thimble SOLES"), "skip_bank": 4, "skip_conta": 11, "habilitado": True},
@@ -200,21 +200,21 @@ EMPRESAS = [
     },
     {
         "nombre"  : "Iñaupari",
-        "ruc"     : "20601345678",
+        "ruc"     : "20542813238",
         "monedas" : [
             {"nombre": "Soles (PEN)",   "sheet_bank": ("REF. IÑAPARI", "REF. IÑAPARI SOLES"),  "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "TECA",
-        "ruc"     : "20601456789",
+        "ruc"     : "20609254778",
         "monedas" : [
             {"nombre": "Soles (PEN)",   "sheet_bank": ("TECA", "TECA SOLES"),        "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
     },
     {
         "nombre"  : "DIONISO",
-        "ruc"     : "20601567890",
+        "ruc"     : "20600692781",
         "monedas" : [
             {"nombre": "Soles (PEN)",   "sheet_bank": ("INV. DIONISO", "INV. DIONISO SOLES"),     "skip_bank": 4, "skip_conta": 11, "habilitado": True},
         ],
@@ -916,17 +916,16 @@ def flujo_reporte_inicial(config: dict) -> None:
 # GENERACIÓN DE ASIENTO ITF Y COMISIONES
 # ══════════════════════════════════════════════════════════
 
-# Mapa de plantillas por banco (clave normalizada) y moneda ('Soles'/'Dolares').
-# Ajustar las rutas si las plantillas están en un subdirectorio distinto.
-_PLANTILLAS_ASIENTO: dict[tuple[str, str], str] = {
-    ("BCP",        "Dolares"): "Asiento_ITF_DOL_1.xlsm",
-    ("BCP",        "Soles"):   "Asiento_ITF_SOL_1.xlsm",
-    ("SCOTIABANK", "Dolares"): "Asiento_ITF_DOL_1.xlsm",
-    ("SCOTIABANK", "Soles"):   "Asiento_ITF_SOL_1.xlsm",
-    ("Scotia",     "Dolares"): "Asiento_ITF_DOL_1.xlsm",
-    ("Scotia",     "Soles"):   "Asiento_ITF_SOL_1.xlsm",
-    ("BN",         "Soles"):   "Asiento_ITF_SOL_1.xlsm",
-}
+# Plantilla universal para el asiento ITF y comisiones.
+# Una sola plantilla sirve para todos los bancos y empresas;
+# las cuentas contables se leen de cuentas_banco.json.
+# Se busca primero en la ruta de red del servidor; si no está disponible,
+# se usa la copia local del proyecto como fallback.
+_DIRECTORIO_PLANTILLAS_RED = Path(
+    r"\\192.168.30.36\Sig\Asistentes Contables 2019"
+    r"\ARCHIVO CONTABLE DIGITAL\CONCILIACION BANCARIA\plantillas"
+)
+_NOMBRE_PLANTILLA_UNIVERSAL = "Plantilla comisiones.xlsm"
 
 # Meses en español tal como aparecen en el nombre del CBF
 _MESES_NUM: dict[str, int] = {
@@ -942,6 +941,7 @@ def _generar_asiento_itf_tras_cbf(
     banco: str,
     moneda: str,
     ruc: str = '',
+    empresa: str = '',
 ) -> None:
     """Consulta el TC Venta del último día del mes y genera el asiento ITF/comisiones.
 
@@ -994,31 +994,44 @@ def _generar_asiento_itf_tras_cbf(
             return
 
     # ── 3. Consultar TC Venta del último día del mes ──────────────
+    # El TC se obtiene del archivo histórico local en la ruta de red:
+    # \\192.168.30.36\Sig\...\CONCILIACION BANCARIA\historico_tc.txt
+    # El archivo contiene una entrada por mes (último día natural del mes).
     from calendar import monthrange
     from datetime import date
+    from decimal import Decimal
     ultimo_dia = date(anio, mes, monthrange(anio, mes)[1])
-    print(f"  >> Consultando TC Venta de Contanet para el {ultimo_dia.strftime('%d/%m/%Y')}...")
+    print(f"  >> Consultando TC Venta del histórico para el cierre de {ultimo_dia.strftime('%m/%Y')}...")
 
     try:
-        from operaciones_sql import obtener_tipo_cambio
-        tc_venta = obtener_tipo_cambio(ultimo_dia)
-        print(f"  >> TC Venta obtenido: {tc_venta}")
+        from get_TC_at_date import obtener_tipo_cambio_fin_mes
+        resultado_tc = obtener_tipo_cambio_fin_mes(anio, mes)
+        tc_venta = Decimal(str(resultado_tc["venta"]))
+        print(f"  >> Fecha del registro en histórico : {resultado_tc['fecha_devuelta']}")
+        print(f"  >> TC Venta obtenido               : {tc_venta}")
     except Exception as e_tc:
-        print(f"  [ERROR] No se pudo obtener el TC Venta de Contanet: {e_tc}")
+        print(f"  [ERROR] No se pudo obtener el TC Venta del histórico: {e_tc}")
         print("  Se omite la generación del asiento ITF y comisiones.")
         return
 
-    # ── 4. Seleccionar plantilla según banco y moneda ─────────────
-    # Normalizar el banco para buscar en el diccionario de plantillas
-    banco_key = banco.upper().strip()
-    plantilla_nombre = (
-        _PLANTILLAS_ASIENTO.get((banco_key, mon_tipo))
-        or _PLANTILLAS_ASIENTO.get((banco, mon_tipo))
-        or _PLANTILLAS_ASIENTO.get(("BCP", mon_tipo))  # fallback genérico
-    )
-    ruta_plantilla = Path(plantilla_nombre)
-    if not ruta_plantilla.is_file():
-        print(f"  [ERROR] Plantilla no encontrada: {ruta_plantilla}")
+    # ── 4. Ubicar plantilla universal ─────────────────────────────
+    # Una sola plantilla Contanet sirve para todos los bancos y empresas.
+    # Las cuentas contables se obtienen de cuentas_banco.json por empresa.
+    # Se busca primero en la ruta de red del servidor y, si no está disponible,
+    # se usa una copia local en el directorio del proyecto como fallback.
+    ruta_plantilla_red   = _DIRECTORIO_PLANTILLAS_RED / _NOMBRE_PLANTILLA_UNIVERSAL
+    ruta_plantilla_local = Path(__file__).parent / _NOMBRE_PLANTILLA_UNIVERSAL
+
+    if ruta_plantilla_red.is_file():
+        ruta_plantilla = ruta_plantilla_red
+        print(f"  >> Plantilla: {ruta_plantilla}")
+    elif ruta_plantilla_local.is_file():
+        ruta_plantilla = ruta_plantilla_local
+        print(f"  >> Plantilla (copia local): {ruta_plantilla}")
+    else:
+        print(f"  [ERROR] Plantilla no encontrada: {_NOMBRE_PLANTILLA_UNIVERSAL}")
+        print(f"          Ruta red  : {ruta_plantilla_red}")
+        print(f"          Ruta local: {ruta_plantilla_local}")
         print("  Se omite la generación del asiento ITF y comisiones.")
         return
 
@@ -1027,28 +1040,26 @@ def _generar_asiento_itf_tras_cbf(
     nombre_salida = f"Asiento_ITF_Comis_{ruta_cbf.stem}{ruta_plantilla.suffix}"
     ruta_salida_asiento = ruta_cbf.parent / nombre_salida
 
-    # ── 6. Determinar banco normalizado para Asiento_ITF_Comis ────
-    # Asiento_ITF_Comis acepta "BCP", "Scotia" o "BCP Miami"
-    banco_asiento = banco
-
-    # ── 7. Generar el asiento ─────────────────────────────────────
+    # ── 6. Generar el asiento ─────────────────────────────────────
+    # Las cuentas contables se leen desde cuentas_banco.json usando empresa+banco+moneda.
     salida = None
     try:
         from Asiento_ITF_Comis import generar_asientos_itf_comisiones
         salida = generar_asientos_itf_comisiones(
             ruta_cbf,
             ruta_plantilla,
-            banco=banco_asiento,
+            banco=banco,
             moneda=mon_tipo,
             tipo_cambio_venta=tc_venta,
             ruta_salida=ruta_salida_asiento,
+            empresa=empresa or '',
         )
         print(f"  >> Asiento ITF y comisiones generado: {salida}")
     except Exception as e_asiento:
         print(f"  [ERROR] No se pudo generar el asiento: {e_asiento}")
         return
 
-    # ── 8. Ingreso en Contanet (Separado del flujo principal por ahora) ──
+    # ── 7. Ingreso en Contanet (Separado del flujo principal por ahora) ──
     # Para volver a integrar el ingreso a Contanet directamente al flujo,
     # basta con cambiar INGRESAR_A_CONTANET_AUTOMATICO a True.
     # Por ahora se mantiene separado del flujo automático.
@@ -1148,9 +1159,8 @@ def flujo_reporte_final(config: dict | None = None) -> None:
         banco=banco_nombre,
         moneda=moneda,
         ruc=ruc,
+        empresa=empresa,
     )
-
-
 
 # ══════════════════════════════════════════════════════════
 # PUNTO DE ENTRADA

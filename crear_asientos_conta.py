@@ -39,7 +39,13 @@ def seleccionar_empresa(app: Application, ruc_cliente: str='20376729126', anio='
     empresa.type_keys(ruc_cliente, with_spaces=True, pause=0.01, vk_packet=True)
     empresa.type_keys("{TAB}", vk_packet=False)
 
+    # Esperar a que Contanet cargue la lista de ejercicios de la empresa
+    # antes de intentar localizar el año deseado.
+    time.sleep(1.5)
+
     ejercicio = window.child_window(title=anio, control_type="ListItem")
+    ejercicio.wait('visible', timeout=10)
+    ejercicio.click_input()   # focaliza y selecciona el año correcto
     ejercicio.type_keys("{ENTER}", vk_packet=False)
 
 

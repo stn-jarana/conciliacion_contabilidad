@@ -31,6 +31,7 @@ from copy import copy
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import json
 from pathlib import Path
 import re
 import unicodedata
@@ -41,9 +42,35 @@ from openpyxl.cell.cell import Cell
 from openpyxl.worksheet.worksheet import Worksheet
 
 
-# La cuenta de empresa para ITF es distinta de la cuenta de gasto de comisión.
-# Se mantienen las claves históricas ``empresa-ITF`` para no perder las cuentas
-# que ya estaban configuradas en este proyecto.
+# ── Carga de cuentas desde cuentas_banco.json ────────────────────────────────
+# El JSON tiene la estructura: empresas[empresa][banco_norm][moneda_codigo]
+# con campos: cuenta_comision, cuenta_itf, cuenta_cce, cuenta_banco.
+# Se mantiene el dict CUENTAS como fallback para compatibilidad con código
+# existente que no pase empresa (solo banco+moneda, igual que antes).
+
+_RUTA_JSON_CUENTAS = Path(__file__).parent / "cuentas_banco.json"
+
+
+def cargar_cuentas_banco() -> dict:
+    """Carga el archivo cuentas_banco.json con las cuentas contables por empresa/banco/moneda.
+
+    Returns
+    -------
+    dict
+        Contenido completo del JSON. La clave principal es ``'empresas'``.
+        Devuelve un dict vacío si el archivo no existe o está mal formado.
+    """
+    if not _RUTA_JSON_CUENTAS.is_file():
+        return {}
+    try:
+        with open(_RUTA_JSON_CUENTAS, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+# Diccionario de fallback para empresas no registradas en el JSON
+# (mantiene compatibilidad con el flujo anterior de una única empresa).
 CUENTAS: dict[tuple[str, str], dict[str, str]] = {
     ("BCP", "MN"): {
         "empresa": "97.7.9.2003",
@@ -390,17 +417,111 @@ def _cuentas_para(
     banco: str,
     moneda: str,
     cuentas_personalizadas: Mapping[tuple[str, str], Mapping[str, str]] | None = None,
+    empresa: str | None = None,
 ) -> Mapping[str, str]:
+    """Devuelve las cuentas contables para un banco, moneda y empresa.
+
+    Orden de búsqueda:
+    1. ``cuentas_personalizadas`` si se proporcionan (API de compatibilidad).
+    2. ``cuentas_banco.json`` buscando por empresa + banco + moneda.
+    3. Diccionario ``CUENTAS`` hardcodeado (fallback legacy).
+
+    Parameters
+    ----------
+    banco:
+        Nombre del banco (ej. ``"BCP"``, ``"SCOTIABANK"``).
+    moneda:
+        Código de moneda (``"MN"`` o ``"ME"``).
+    cuentas_personalizadas:
+        Mapa opcional con la misma estructura que ``CUENTAS``.
+    empresa:
+        Abreviatura de la empresa (ej. ``"STN"``, ``"CMT"``). Si se
+        indica, se busca en ``cuentas_banco.json`` antes del fallback.
+    """
     banco_normalizado = _normalizar_banco(banco)
     moneda_normalizada = _normalizar_moneda(moneda)
-    catalogo = cuentas_personalizadas or CUENTAS
-    cuentas = catalogo.get((banco_normalizado, moneda_normalizada))
-    if cuentas is None:
-        raise ErrorAsientoITFComisiones(
-            f"No hay cuentas configuradas para banco={banco_normalizado!r}, "
-            f"moneda={moneda_normalizada!r}."
-        )
 
+    # ── 1. cuentas_personalizadas (compatibilidad) ────────────────────────
+    if cuentas_personalizadas is not None:
+        cuentas = cuentas_personalizadas.get((banco_normalizado, moneda_normalizada))
+        if cuentas is not None:
+            return _validar_y_extraer_cuentas(cuentas, banco_normalizado, moneda_normalizada)
+
+    # ── 2. cuentas_banco.json (fuente principal) ──────────────────────────
+    if empresa:
+        datos_json = cargar_cuentas_banco()
+        empresa_upper = empresa.strip().upper()
+        # Intentar coincidencia exacta primero; luego búsqueda insensible a mayúsculas
+        empresas_json: dict = datos_json.get("empresas", {})
+        cfg_empresa = empresas_json.get(empresa_upper) or next(
+            (v for k, v in empresas_json.items() if k.upper() == empresa_upper), None
+        )
+        if cfg_empresa is not None:
+            # El JSON usa bancos normalizados: BCP, SCOTIABANK, BN.
+            # _normalizar_banco devuelve "SCOTIA" pero el JSON puede tener "SCOTIABANK".
+            # Se prueban todos los alias para garantizar la coincidencia.
+            _ALIAS_BANCO: dict[str, tuple[str, ...]] = {
+                "SCOTIA": ("SCOTIABANK", "SCOTIBANK", "SCOTIA"),
+                "SCOTIABANK": ("SCOTIABANK", "SCOTIBANK", "SCOTIA"),
+            }
+            claves_banco = _ALIAS_BANCO.get(banco_normalizado, (banco_normalizado,))
+            cfg_banco = None
+            for clave_banco_json in claves_banco:
+                cfg_banco = cfg_empresa.get(clave_banco_json)
+                if cfg_banco is not None:
+                    break
+            if cfg_banco is not None:
+                cfg = cfg_banco.get(moneda_normalizada)  # "MN" o "ME"
+                if cfg is not None:
+                    cuenta_comision = cfg.get("cuenta_comision", "")
+                    cuenta_itf = cfg.get("cuenta_itf", "")
+                    cuenta_cce = cfg.get("cuenta_cce", "")  # puede no existir (Scotiabank)
+                    cuenta_banco = cfg.get("cuenta_banco", "")
+                    faltantes = [
+                        nombre for nombre, valor in {
+                            "cuenta_comision": cuenta_comision,
+                            "cuenta_itf": cuenta_itf,
+                            "cuenta_banco": cuenta_banco,
+                        }.items()
+                        if not str(valor or "").strip()
+                    ]
+                    if faltantes:
+                        raise ErrorAsientoITFComisiones(
+                            f"Faltan cuentas en cuentas_banco.json para "
+                            f"empresa={empresa_upper!r}, banco={banco_normalizado!r}, "
+                            f"moneda={moneda_normalizada!r}: " + ", ".join(faltantes)
+                        )
+                    return {
+                        "empresa": cuenta_comision,        # cuenta de gasto de comisión
+                        "empresa_itf": cuenta_itf,         # cuenta de gasto de ITF
+                        "empresa_cce": cuenta_cce,         # cuenta de gasto CCE (puede vacío)
+                        "banco": cuenta_banco,             # cuenta bancaria (haber)
+                    }
+
+    # ── 3. Fallback al dict CUENTAS hardcodeado ───────────────────────────
+    cuentas_fallback = CUENTAS.get((banco_normalizado, moneda_normalizada))
+    if cuentas_fallback is None:
+        # Intentar alias SCOTIA → SCOTIABANK
+        alias = {"SCOTIABANK": "SCOTIA", "SCOTIA": "SCOTIABANK"}
+        alt = alias.get(banco_normalizado)
+        if alt:
+            cuentas_fallback = CUENTAS.get((alt, moneda_normalizada))
+    if cuentas_fallback is None:
+        empresa_msg = f"empresa={empresa!r}, " if empresa else ""
+        raise ErrorAsientoITFComisiones(
+            f"No hay cuentas configuradas para {empresa_msg}"
+            f"banco={banco_normalizado!r}, moneda={moneda_normalizada!r}. "
+            f"Agregue la empresa/banco al archivo cuentas_banco.json."
+        )
+    return _validar_y_extraer_cuentas(cuentas_fallback, banco_normalizado, moneda_normalizada)
+
+
+def _validar_y_extraer_cuentas(
+    cuentas: Mapping[str, str],
+    banco_normalizado: str,
+    moneda_normalizada: str,
+) -> Mapping[str, str]:
+    """Valida que el mapa de cuentas tenga los campos obligatorios y los normaliza."""
     empresa_itf = cuentas.get("empresa_itf") or cuentas.get("empresa-ITF")
     faltantes = [
         nombre
@@ -415,13 +536,15 @@ def _cuentas_para(
         raise ErrorAsientoITFComisiones(
             f"Faltan cuentas para {banco_normalizado} {moneda_normalizada}: "
             + ", ".join(faltantes)
-            + ". Complete CUENTAS o use cuentas_personalizadas."
+            + ". Complete cuentas_banco.json o use cuentas_personalizadas."
         )
     return {
         "empresa": str(cuentas["empresa"]),
         "empresa_itf": str(empresa_itf),
+        "empresa_cce": str(cuentas.get("empresa_cce", cuentas.get("empresa", ""))),
         "banco": str(cuentas["banco"]),
     }
+
 
 
 def _resolver_tc_venta(tipo_cambio_venta: TipoCambioVenta, fecha_cierre: date) -> Decimal:
@@ -543,6 +666,7 @@ def generar_asientos_itf_comisiones(
     tipo_cambio_venta: TipoCambioVenta,
     ruta_salida: str | Path | None = None,
     cuentas_personalizadas: Mapping[tuple[str, str], Mapping[str, str]] | None = None,
+    empresa: str | None = None,
 ) -> Path:
     """Genera y guarda la plantilla de importación de ITF y comisiones.
 
@@ -551,6 +675,13 @@ def generar_asientos_itf_comisiones(
     asiento. Los cinco campos de fecha reciben el último día del mes de la
     operación; los montos se generan en MN y ME usando el TC Venta del cierre.
     Si la plantilla incluye ``ImportCONTABILIDAD``, se sincroniza automáticamente.
+
+    Parameters
+    ----------
+    empresa:
+        Abreviatura de la empresa (ej. ``"STN"``, ``"CMT"``). Se usa para
+        buscar las cuentas contables en ``cuentas_banco.json``. Si no se
+        indica, se utilizan las cuentas del diccionario ``CUENTAS`` (fallback).
     """
     ruta_final = Path(ruta_conciliacion_final).expanduser().resolve()
     plantilla = Path(ruta_plantilla).expanduser().resolve()
@@ -559,7 +690,7 @@ def generar_asientos_itf_comisiones(
 
     movimientos = leer_movimientos_itf_comisiones(ruta_final)
     moneda_normalizada = _normalizar_moneda(moneda)
-    cuentas = _cuentas_para(banco, moneda_normalizada, cuentas_personalizadas)
+    cuentas = _cuentas_para(banco, moneda_normalizada, cuentas_personalizadas, empresa=empresa)
 
     cierres = {ultimo_dia_mes(movimiento.fecha) for movimiento in movimientos}
     if len(cierres) > 1 and not callable(tipo_cambio_venta) and not isinstance(tipo_cambio_venta, Mapping):
@@ -610,9 +741,15 @@ def generar_asientos_itf_comisiones(
         for relacionado, movimiento in enumerate(movimientos, start=1):
             fecha_cierre = ultimo_dia_mes(movimiento.fecha)
             tc_venta = tipos_cambio[fecha_cierre]
-            cuenta_empresa = (
-                cuentas["empresa_itf"] if movimiento.tipo == "ITF" else cuentas["empresa"]
-            )
+            # Seleccionar la cuenta de empresa según el tipo de movimiento:
+            # ITF → cuenta_itf, TRANFERENCIA CCE → cuenta_cce (si existe), COMISION → empresa
+            if movimiento.tipo == "ITF":
+                cuenta_empresa = cuentas["empresa_itf"]
+            elif movimiento.tipo == "COMISION" and cuentas.get("empresa_cce"):
+                cuenta_empresa = cuentas["empresa_cce"]
+            else:
+                cuenta_empresa = cuentas["empresa"]
+
             montos_empresa, montos_banco = _montos_asiento(
                 movimiento.monto, moneda_normalizada, tc_venta
             )

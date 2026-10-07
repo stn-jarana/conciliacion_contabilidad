@@ -215,6 +215,86 @@ def _diferencias_comision(moneda: str) -> set[float]:
     return {1.53, 82.00, 94.00, 69.00, 29.00}
 
 
+def _buscar_combinacion_suma_eficiente(
+    target_amt: float,
+    candidates: list[tuple[int, float]],
+    difs_permitidas: set[float],
+    min_elementos: int = 2,
+    max_elementos: int = 6,
+) -> tuple[Optional[list[int]], float]:
+    """
+    Busca una combinación de 'candidates' que sume 'target_amt' (o difiera en comisiones permitidas).
+    Retorna (lista_de_idxs, diff) si existe exactamente una única combinación válida.
+    Si no hay combinación o si existe ambigüedad (más de una solución válida), retorna (None, 0.0).
+    """
+    if not candidates or len(candidates) < min_elementos:
+        return None, 0.0
+
+    target_cents = int(round(abs(target_amt) * 100))
+    if target_cents <= 0:
+        return None, 0.0
+
+    allowed_diffs_cents = {int(round(d * 100)) for d in difs_permitidas if round(d * 100) < target_cents}
+    if not allowed_diffs_cents:
+        allowed_diffs_cents = {0}
+
+    max_diff_cents = max(allowed_diffs_cents)
+    max_target_cents = target_cents + max_diff_cents
+    min_target_cents = max(0, target_cents - max_diff_cents)
+
+    items = []
+    for idx, amt in candidates:
+        if (amt > 0) == (target_amt > 0):
+            c = int(round(abs(amt) * 100))
+            if 0 < c <= max_target_cents:
+                items.append((idx, c))
+
+    if len(items) < min_elementos:
+        return None, 0.0
+
+    items.sort(key=lambda x: x[1], reverse=True)
+    n_items = len(items)
+
+    suffix_sums = [0] * (n_items + 1)
+    for i in range(n_items - 1, -1, -1):
+        suffix_sums[i] = suffix_sums[i + 1] + items[i][1]
+
+    soluciones: list[tuple[list[int], float]] = []
+
+    def backtrack(start: int, current_sum: int, current_idxs: list[int]):
+        if len(soluciones) > 1:
+            return
+
+        diff = abs(target_cents - current_sum)
+        if len(current_idxs) >= min_elementos and diff in allowed_diffs_cents:
+            soluciones.append((list(current_idxs), diff / 100.0))
+            if len(soluciones) > 1:
+                return
+
+        if len(current_idxs) >= max_elementos or start >= n_items:
+            return
+
+        if current_sum + suffix_sums[start] < min_target_cents:
+            return
+
+        for i in range(start, n_items):
+            idx, val = items[i]
+            if current_sum + val > max_target_cents:
+                continue
+
+            current_idxs.append(idx)
+            backtrack(i + 1, current_sum + val, current_idxs)
+            current_idxs.pop()
+            if len(soluciones) > 1:
+                break
+
+    backtrack(0, 0, [])
+
+    if len(soluciones) == 1:
+        return soluciones[0]
+    return None, 0.0
+
+
 def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, moneda: str = "Dolares (USD)", banco: str = ""):
     """
     Algoritmo de conciliación automática con las reglas:
@@ -270,6 +350,12 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
     for col, default in _cols_conta_req.items():
         if col not in conta_ext.columns:
             conta_ext[col] = default
+
+    for col in ['MAR', '# Operación2', 'Anotación']:
+        if col in banco_ext.columns:
+            banco_ext[col] = banco_ext[col].astype(object)
+        if col in conta_ext.columns:
+            conta_ext[col] = conta_ext[col].astype(object)
     # ─────────────────────────────────────────────────────────────────────────────
 
     banco_ext['_matched'] = False
@@ -334,17 +420,17 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
 
     def _norm_series(ser: pd.Series) -> pd.Series:
         """Normaliza la serie de # Operación a string limpio."""
-        s = ser.astype(str).str.strip()
-        s = s.where(~s.str.lower().isin(['nan', '0', 'none']), '')
+        s = ser.fillna('').astype(str).str.strip()
+        s = s.replace(['nan', '0', '0.0', 'None', 'none'], '')
         s = s.where(~s.str.endswith('.0'), s.str[:-2].str.strip())
-        return s
+        return s.fillna('').astype(str)
 
     banco_ext['_op_norm'] = _norm_series(banco_ext['Banco - # Operación'])
     conta_ext['_op_norm'] = _norm_series(conta_ext['Conta - # Operación'])
 
     # Sufijo numérico: 5 dígitos mínimo (cubre ops alfanuméricas tipo '68478AFB')
     def _sufijo6(norm_op: str) -> str:
-        digits = _re_inline.sub(r'\D', '', norm_op)
+        digits = _re_inline.sub(r'\D', '', str(norm_op or ''))
         return digits[-5:] if len(digits) >= 5 else ''
 
     banco_ext['_op_suf6'] = banco_ext['_op_norm'].apply(_sufijo6)
@@ -352,20 +438,29 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
     banco_ext['_monto_r'] = banco_ext['Monto-Banco'].fillna(0).astype(float).round(2)
     conta_ext['_monto_r'] = conta_ext['Monto-Conta'].fillna(0).astype(float).round(2)
 
+    # Identificación estricta de movimientos ITF (solo se concilian/suman con otros ITF)
+    _pat_itf_regex = _re_inline.compile(
+        r'(?i)(?:\bITF\b|I\.T\.F\.)|'
+        r'IMPUESTO\s+(?:A\s+LOS\s+(?:DEBITOS|CREDITOS)|ITF|TRANSACCIONES)|'
+        r'REGULARIZACION\s+ITF'
+    )
+    banco_ext['_es_itf'] = banco_ext['Banco - Descripción'].astype(str).str.contains(_pat_itf_regex, regex=True)
+    conta_ext['_es_itf'] = (conta_ext['Conta - Giro'].astype(str) + " " + conta_ext['Conta - Glosa'].astype(str)).str.contains(_pat_itf_regex, regex=True)
+
     def _rebuild_suf6_index():
         """Reconstruye el índice sufijo6 → [b_idxs] con los no conciliados actuales."""
         idx: dict[str, list] = {}
         for b_idx in banco_ext.index[~banco_ext['_matched']]:
-            suf = banco_ext.at[b_idx, '_op_suf6']
+            suf = str(banco_ext.at[b_idx, '_op_suf6'] or '')
             if suf:
                 idx.setdefault(suf, []).append(b_idx)
         return idx
 
     def _candidatos_por_op(c_idx, suf6_index) -> list:
         """Devuelve b_idxs donde _coincide_nro_op vale True para el conta dado."""
-        op_c   = conta_ext.at[c_idx, '_op_norm']
-        suf6_c = conta_ext.at[c_idx, '_op_suf6']
-        if not op_c:
+        op_c   = str(conta_ext.at[c_idx, '_op_norm'] or '').strip()
+        suf6_c = str(conta_ext.at[c_idx, '_op_suf6'] or '').strip()
+        if not op_c or op_c in ('nan', '0', '0.0'):
             return []
 
         candidatos: list = []
@@ -381,8 +476,8 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
         sc_norm = op_c.lstrip('0') or op_c
         variantes_c = [v for v in {op_c, sc_norm} if len(v) >= 4]
         for b_idx in banco_ext.index[~banco_ext['_matched']]:
-            op_b = banco_ext.at[b_idx, '_op_norm']
-            if not op_b:
+            op_b = str(banco_ext.at[b_idx, '_op_norm'] or '').strip()
+            if not op_b or op_b in ('nan', '0', '0.0'):
                 continue
             sb_norm = op_b.lstrip('0') or op_b
             # op_c es sufijo de op_b
@@ -647,6 +742,9 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             if len(idxs_b) == 1 and len(idxs_c) == 1:
                 b_idx = idxs_b[0]
                 c_idx = idxs_c[0]
+                # No conciliar si uno es ITF y el otro no
+                if bool(banco_ext.at[b_idx, '_es_itf']) != bool(conta_ext.at[c_idx, '_es_itf']):
+                    continue
                 op_b = _normalizar_nro_op(banco_ext.at[b_idx, 'Banco - # Operación'])
                 op_c = _normalizar_nro_op(conta_ext.at[c_idx, 'Conta - # Operación'])
                 if op_b and op_c and op_b == op_c:
@@ -678,6 +776,9 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
         if len(b_idxs) == 1 and k in freq_c and len(freq_c[k]) == 1:
             b_idx = b_idxs[0]
             c_idx = freq_c[k][0]
+            # No conciliar si uno es ITF y el otro no
+            if bool(banco_ext.at[b_idx, '_es_itf']) != bool(conta_ext.at[c_idx, '_es_itf']):
+                continue
             banco_ext.at[b_idx, '_matched'] = True
             conta_ext.at[c_idx, '_matched'] = True
             banco_ext.at[b_idx, 'MAR'] = 'X'
@@ -719,6 +820,9 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
         n = len(b_idxs)
         # Solo aplica cuando hay el mismo número en ambos lados y es >= 2
         if n < 2 or len(c_idxs) != n:
+            continue
+        # No sugerir si difieren en condición de ITF
+        if any(bool(banco_ext.at[b, '_es_itf']) != bool(conta_ext.at[c, '_es_itf']) for b, c in zip(b_idxs, c_idxs)):
             continue
         # Emparejar posicionalmente
         for pair_i, (b_idx, c_idx) in enumerate(zip(b_idxs, c_idxs)):
@@ -813,100 +917,67 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
                         banco_ext.at[b_i, 'Anotación'] = anot
 
     # 4. Sumas N a 1 y 1 a N (COMO SUGERENCIAS)
+    # 4.1 Primer intento: sumas dentro de la misma fecha
     fechas = set(banco_ext.loc[~banco_ext['_matched'], 'Fecha']).union(
              set(conta_ext.loc[~conta_ext['_matched'], 'Fecha']))
-             
+
     for f in fechas:
-        # 1 Banco = N Conta
+        # 1 Banco = N Conta (misma fecha)
         unmatched_b = banco_ext[(~banco_ext['_matched']) & (banco_ext['Fecha'] == f)]
         unmatched_c = conta_ext[(~conta_ext['_matched']) & (conta_ext['Fecha'] == f)]
-        pool_b = [(idx, float(r.get('Monto-Banco', 0) or 0)) for idx, r in unmatched_b.iterrows()]
-        pool_c = [(idx, float(r.get('Monto-Conta', 0) or 0)) for idx, r in unmatched_c.iterrows() if not r.get('_suggested', False)]
-        
+        pool_b = [(idx, float(r.get('Monto-Banco', 0) or 0)) for idx, r in unmatched_b.iterrows() if not str(banco_ext.at[idx, 'Anotación']).startswith('Sugerido')]
+        pool_c = [(idx, float(r.get('Monto-Conta', 0) or 0)) for idx, r in unmatched_c.iterrows() if not r.get('_suggested', False) and not str(conta_ext.at[idx, 'Anotación']).startswith('Sugerido')]
+
         used_c = set()
         for b_idx, b_amt in pool_b:
-            # Solo conciliar con montos del mismo signo (positivo con positivo, negativo con negativo)
-            avail_c = [x for x in pool_c if x[0] not in used_c and (x[1] > 0) == (b_amt > 0)]
-            # Guard anti-explosión combinatoria: si hay demasiados candidatos por fecha, omitir
-            if len(avail_c) > 15:
-                continue
-            valid_combos = []
-            for r in range(2, min(6, len(avail_c) + 1)):
-                for combo in combinations(avail_c, r):
-                    suma_conta = sum(x[1] for x in combo)
-                    diff = round(abs(abs(b_amt) - abs(suma_conta)), 2)
-                    # La diferencia debe pertenecer al set permitido Y ser menor
-                    # que el monto del banco (evita asociar -10.5 con dos -10.5
-                    # alegando una "diferencia de comisión" de 10.5)
-                    if diff in diferencias and diff < abs(b_amt):
-                        valid_combos.append((combo, diff))
-                        
-            if len(valid_combos) == 1:
-                combo_idxs = [x[0] for x in valid_combos[0][0]]
-                diff_val = valid_combos[0][1]
+            b_es_itf = bool(banco_ext.at[b_idx, '_es_itf'])
+            avail_c = [
+                x for x in pool_c
+                if x[0] not in used_c and (x[1] > 0) == (b_amt > 0)
+                and bool(conta_ext.at[x[0], '_es_itf']) == b_es_itf
+            ]
+            combo_idxs, diff_val = _buscar_combinacion_suma_eficiente(b_amt, avail_c, {0.0}, min_elementos=2, max_elementos=6)
+            if combo_idxs:
                 used_c.update(combo_idxs)
-                
                 op_link = f"SUG-SUM-B{b_idx}"
                 banco_ext.at[b_idx, '# Operación2'] = op_link
-                
-                if diff_val == 0.0:
-                    anot = 'Sugerido: 1 Banco = N Conta'
-                else:
-                    anot = f'Sugerido: 1 Banco = N Conta (Dif {diff_val})'
-                    
+                anot = 'Sugerido: 1 Banco = N Conta'
                 banco_ext.at[b_idx, 'Anotación'] = anot
                 for c_idx in combo_idxs:
                     conta_ext.at[c_idx, '# Operación2'] = op_link
                     conta_ext.at[c_idx, 'Anotación'] = anot
                     conta_ext.at[c_idx, '_suggested'] = True
-                    
-        # N Banco = 1 Conta (refrescar pools)
+
+        # N Banco = 1 Conta (misma fecha, refrescar pools)
         unmatched_c2 = conta_ext[(~conta_ext['_matched']) & (conta_ext['Fecha'] == f)]
         unmatched_b2 = banco_ext[(~banco_ext['_matched']) & (banco_ext['Fecha'] == f)]
-        pool_c2 = [(idx, float(r.get('Monto-Conta', 0) or 0)) for idx, r in unmatched_c2.iterrows() if not r.get('_suggested', False)]
+        pool_c2 = [(idx, float(r.get('Monto-Conta', 0) or 0)) for idx, r in unmatched_c2.iterrows() if not r.get('_suggested', False) and not str(conta_ext.at[idx, 'Anotación']).startswith('Sugerido')]
         pool_b2 = [(idx, float(r.get('Monto-Banco', 0) or 0)) for idx, r in unmatched_b2.iterrows() if not str(banco_ext.at[idx, 'Anotación']).startswith('Sugerido')]
-        
+
         used_b = set()
         for c_idx, c_amt in pool_c2:
-            # Solo conciliar con montos del mismo signo (positivo con positivo, negativo con negativo)
-            avail_b = [x for x in pool_b2 if x[0] not in used_b and (x[1] > 0) == (c_amt > 0)]
-            # Guard anti-explosión combinatoria: si hay demasiados candidatos por fecha, omitir
-            if len(avail_b) > 15:
-                continue
-            valid_combos = []
-            for r in range(2, min(6, len(avail_b) + 1)):
-                for combo in combinations(avail_b, r):
-                    suma_banco = sum(x[1] for x in combo)
-                    diff = round(abs(abs(suma_banco) - abs(c_amt)), 2)
-                    # La diferencia debe pertenecer al set permitido Y ser menor
-                    # que el monto de conta (misma validación que en 1 Banco = N Conta)
-                    if diff in diferencias and diff < abs(c_amt):
-                        valid_combos.append((combo, diff))
-                        
-            if len(valid_combos) == 1:
-                combo_idxs = [x[0] for x in valid_combos[0][0]]
-                diff_val = valid_combos[0][1]
+            c_es_itf = bool(conta_ext.at[c_idx, '_es_itf'])
+            avail_b = [
+                x for x in pool_b2
+                if x[0] not in used_b and (x[1] > 0) == (c_amt > 0)
+                and bool(banco_ext.at[x[0], '_es_itf']) == c_es_itf
+            ]
+            combo_idxs, diff_val = _buscar_combinacion_suma_eficiente(c_amt, avail_b, {0.0}, min_elementos=2, max_elementos=6)
+            if combo_idxs:
                 used_b.update(combo_idxs)
-                
                 op_link = f"SUG-SUM-C{c_idx}"
                 conta_ext.at[c_idx, '# Operación2'] = op_link
                 conta_ext.at[c_idx, '_suggested'] = True
-                
-                if diff_val == 0.0:
-                    anot = 'Sugerido: N Banco = 1 Conta'
-                else:
-                    anot = f'Sugerido: N Banco = 1 Conta (Dif {diff_val})'
-                    
+                anot = 'Sugerido: N Banco = 1 Conta' if diff_val == 0.0 else f'Sugerido: N Banco = 1 Conta (Dif {diff_val})'
                 conta_ext.at[c_idx, 'Anotación'] = anot
                 for b_idx in combo_idxs:
                     banco_ext.at[b_idx, '# Operación2'] = op_link
                     banco_ext.at[b_idx, 'Anotación'] = anot
 
-    # 4.3b Segundo pase de sumas sin restricción de fecha (Opción A)
-    # Cubre casos donde N movimientos del banco de distintas fechas suman exactamente
-    # 1 registro de contabilidad (o viceversa). Solo se acepta diferencia == 0.0 para
-    # evitar falsos positivos al relajar la restricción de fecha.
-    # Se ejecuta DESPUÉS del pase por fecha exacta, usando solo los aún no conciliados/sugeridos.
+    # 4.2 Pase general de sumas sin importar la fecha
+    # Cuando hay un solo movimiento ya sea en conta o en banco, tratamos de conciliar
+    # con otros N registros sin importar la fecha que tienen los N registros comparados con el registro único.
+    # REGLA: El ITF solo puede sumarse con otros ITF, nunca con movimientos comerciales o no-ITF.
     _pool_b_global = [
         (idx, float(r.get('Monto-Banco', 0) or 0))
         for idx, r in banco_ext[~banco_ext['_matched']].iterrows()
@@ -920,31 +991,22 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
     ]
 
     _used_c_global = set()
-    # 1 Banco = N Conta (fechas distintas, monto exacto)
-    # NOTA: Guard reducido a 10 y combinaciones máx de 3 elementos (vs. 25/6 anterior)
-    # para evitar explosión combinatoria con extractos grandes (C(10,3)=120 vs C(25,6)=177100).
-    # Coincidencias globales de 4+ movimientos entre fechas distintas son prácticamente irreales.
+    # 1 Banco = N Conta (sin importar la fecha)
     for b_idx, b_amt in _pool_b_global:
         if b_amt == 0:
             continue
-        # Solo conciliar con montos del mismo signo (positivo con positivo, negativo con negativo)
-        avail_c = [x for x in _pool_c_global if x[0] not in _used_c_global and (x[1] > 0) == (b_amt > 0)]
-        # Guard anti-explosión combinatoria (más estricto para el pase global sin fecha)
-        if len(avail_c) > 10:
-            continue
-        valid_combos = []
-        for _r in range(2, min(4, len(avail_c) + 1)):
-            for combo in combinations(avail_c, _r):
-                suma_conta = sum(x[1] for x in combo)
-                diff = round(abs(abs(b_amt) - abs(suma_conta)), 2)
-                if diff == 0.0:
-                    valid_combos.append((combo, diff))
-        if len(valid_combos) == 1:
-            combo_idxs = [x[0] for x in valid_combos[0][0]]
+        b_es_itf = bool(banco_ext.at[b_idx, '_es_itf'])
+        avail_c = [
+            x for x in _pool_c_global
+            if x[0] not in _used_c_global and (x[1] > 0) == (b_amt > 0)
+            and bool(conta_ext.at[x[0], '_es_itf']) == b_es_itf
+        ]
+        combo_idxs, diff_val = _buscar_combinacion_suma_eficiente(b_amt, avail_c, {0.0}, min_elementos=2, max_elementos=6)
+        if combo_idxs:
             _used_c_global.update(combo_idxs)
             op_link = f"SUG-SUM-B{b_idx}"
-            anot = 'Sugerido: 1 Banco = N Conta (fechas distintas)'
             banco_ext.at[b_idx, '# Operación2'] = op_link
+            anot = 'Sugerido: 1 Banco = N Conta'
             banco_ext.at[b_idx, 'Anotación'] = anot
             for c_idx in combo_idxs:
                 conta_ext.at[c_idx, '# Operación2'] = op_link
@@ -952,30 +1014,23 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
                 conta_ext.at[c_idx, '_suggested'] = True
 
     _used_b_global = set()
-    # N Banco = 1 Conta (fechas distintas, monto exacto)
-    # NOTA: Guard reducido a 10 y combinaciones máx de 3 elementos (ver nota arriba).
+    # N Banco = 1 Conta (sin importar la fecha)
     for c_idx, c_amt in _pool_c_global:
         if c_amt == 0 or c_idx in _used_c_global:
             continue
-        # Solo conciliar con montos del mismo signo (positivo con positivo, negativo con negativo)
-        avail_b = [x for x in _pool_b_global if x[0] not in _used_b_global and (x[1] > 0) == (c_amt > 0)]
-        # Guard anti-explosión combinatoria (más estricto para el pase global sin fecha)
-        if len(avail_b) > 10:
-            continue
-        valid_combos = []
-        for _r in range(2, min(4, len(avail_b) + 1)):
-            for combo in combinations(avail_b, _r):
-                suma_banco = sum(x[1] for x in combo)
-                diff = round(abs(abs(suma_banco) - abs(c_amt)), 2)
-                if diff == 0.0:
-                    valid_combos.append((combo, diff))
-        if len(valid_combos) == 1:
-            combo_idxs = [x[0] for x in valid_combos[0][0]]
+        c_es_itf = bool(conta_ext.at[c_idx, '_es_itf'])
+        avail_b = [
+            x for x in _pool_b_global
+            if x[0] not in _used_b_global and (x[1] > 0) == (c_amt > 0)
+            and bool(banco_ext.at[x[0], '_es_itf']) == c_es_itf
+        ]
+        combo_idxs, diff_val = _buscar_combinacion_suma_eficiente(c_amt, avail_b, {0.0}, min_elementos=2, max_elementos=6)
+        if combo_idxs:
             _used_b_global.update(combo_idxs)
             op_link = f"SUG-SUM-C{c_idx}"
-            anot = 'Sugerido: N Banco = 1 Conta (fechas distintas)'
             conta_ext.at[c_idx, '# Operación2'] = op_link
             conta_ext.at[c_idx, '_suggested'] = True
+            anot = 'Sugerido: N Banco = 1 Conta'
             conta_ext.at[c_idx, 'Anotación'] = anot
             for b_idx in combo_idxs:
                 banco_ext.at[b_idx, '# Operación2'] = op_link
@@ -1640,32 +1695,22 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
         for c_idx, c_amt in _unm_c_6b:
             if c_amt == 0 or c_idx in _used_c_6b:
                 continue
-            avail_b = [x for x in _unm_b_6b if x[0] not in _used_b_6b]
-            if len(avail_b) < 2:
-                continue
-            # Guard anti-explosión combinatoria: máx 15 disponibles y máx 3 combinados
-            if len(avail_b) > 15:
-                continue
-            # Buscar la combinación única que sume exactamente c_amt
-            _valid: list = []
-            for _r in range(2, min(len(avail_b) + 1, 4)):
-                for combo in combinations(avail_b, _r):
-                    if round(abs(abs(sum(x[1] for x in combo)) - abs(c_amt)), 2) == 0.0:
-                        _valid.append(combo)
-                    if len(_valid) > 1:
-                        break
-                if len(_valid) > 1:
-                    break
-            if len(_valid) == 1:
-                b_idxs_sel = [x[0] for x in _valid[0]]
-                _used_b_6b.update(b_idxs_sel)
+            c_es_itf = bool(conta_ext.at[c_idx, '_es_itf'])
+            avail_b = [
+                x for x in _unm_b_6b
+                if x[0] not in _used_b_6b and (x[1] > 0) == (c_amt > 0)
+                and bool(banco_ext.at[x[0], '_es_itf']) == c_es_itf
+            ]
+            combo_idxs, diff_val = _buscar_combinacion_suma_eficiente(c_amt, avail_b, {0.0}, min_elementos=2, max_elementos=6)
+            if combo_idxs:
+                _used_b_6b.update(combo_idxs)
                 _used_c_6b.add(c_idx)
                 op_link = f"SUG-LAST-C{c_idx}"
                 anot = 'Sugerido: N Banco = 1 Conta (fechas distintas)'
                 conta_ext.at[c_idx, '# Operación2'] = op_link
                 conta_ext.at[c_idx, 'Anotación'] = anot
                 conta_ext.at[c_idx, '_suggested'] = True
-                for b_idx in b_idxs_sel:
+                for b_idx in combo_idxs:
                     banco_ext.at[b_idx, '# Operación2'] = op_link
                     banco_ext.at[b_idx, 'Anotación'] = anot
                 _cambio_6b = True
@@ -1674,30 +1719,21 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
         for b_idx, b_amt in _unm_b_6b:
             if b_amt == 0 or b_idx in _used_b_6b:
                 continue
-            avail_c = [x for x in _unm_c_6b if x[0] not in _used_c_6b]
-            if len(avail_c) < 2:
-                continue
-            # Guard anti-explosión combinatoria: máx 15 disponibles y máx 3 combinados
-            if len(avail_c) > 15:
-                continue
-            _valid = []
-            for _r in range(2, min(len(avail_c) + 1, 4)):
-                for combo in combinations(avail_c, _r):
-                    if round(abs(abs(sum(x[1] for x in combo)) - abs(b_amt)), 2) == 0.0:
-                        _valid.append(combo)
-                    if len(_valid) > 1:
-                        break
-                if len(_valid) > 1:
-                    break
-            if len(_valid) == 1:
-                c_idxs_sel = [x[0] for x in _valid[0]]
-                _used_c_6b.update(c_idxs_sel)
+            b_es_itf = bool(banco_ext.at[b_idx, '_es_itf'])
+            avail_c = [
+                x for x in _unm_c_6b
+                if x[0] not in _used_c_6b and (x[1] > 0) == (b_amt > 0)
+                and bool(conta_ext.at[x[0], '_es_itf']) == b_es_itf
+            ]
+            combo_idxs, diff_val = _buscar_combinacion_suma_eficiente(b_amt, avail_c, {0.0}, min_elementos=2, max_elementos=6)
+            if combo_idxs:
+                _used_c_6b.update(combo_idxs)
                 _used_b_6b.add(b_idx)
                 op_link = f"SUG-LAST-B{b_idx}"
                 anot = 'Sugerido: 1 Banco = N Conta (fechas distintas)'
                 banco_ext.at[b_idx, '# Operación2'] = op_link
                 banco_ext.at[b_idx, 'Anotación'] = anot
-                for c_idx in c_idxs_sel:
+                for c_idx in combo_idxs:
                     conta_ext.at[c_idx, '# Operación2'] = op_link
                     conta_ext.at[c_idx, 'Anotación'] = anot
                     conta_ext.at[c_idx, '_suggested'] = True
@@ -1715,7 +1751,10 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
         if not str(row.get('Anotación', '')).strip():
             conta_ext.at[idx, 'Anotación'] = 'Mov. solo en conta'
 
-    return banco_ext.drop(columns=['_matched']), conta_ext.drop(columns=['_matched'])
+    return (
+        banco_ext.drop(columns=['_matched', '_es_itf'], errors='ignore'),
+        conta_ext.drop(columns=['_matched', '_es_itf'], errors='ignore'),
+    )
 
 
 def _sugerencias_meses_anteriores(
