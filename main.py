@@ -1053,29 +1053,48 @@ def _generar_asiento_itf_tras_cbf(
             tipo_cambio_venta=tc_venta,
             ruta_salida=ruta_salida_asiento,
             empresa=empresa or '',
+            fecha_cierre=ultimo_dia,
         )
+        if salida is None:
+            # Las comisiones ya tienen asiento registrado en contabilidad.
+            # El mensaje informativo ya fue impreso por generar_asientos_itf_comisiones.
+            return
         print(f"  >> Asiento ITF y comisiones generado: {salida}")
     except Exception as e_asiento:
         print(f"  [ERROR] No se pudo generar el asiento: {e_asiento}")
         return
 
-    # ── 7. Ingreso en Contanet (Separado del flujo principal por ahora) ──
-    # Para volver a integrar el ingreso a Contanet directamente al flujo,
-    # basta con cambiar INGRESAR_A_CONTANET_AUTOMATICO a True.
-    # Por ahora se mantiene separado del flujo automático.
-    INGRESAR_A_CONTANET_AUTOMATICO = True
+    # ── 7. Ingreso en Contanet ──────────────────────────────────
+    if salida is not None:
+        if not ruc:
+            print("  [ERROR] No se tiene el RUC de la empresa. No se puede ingresar el asiento a Contanet.")
+            print("          Verifique que el nombre del archivo CBI incluya el nombre de empresa correcto.")
+            print(f"          Empresa detectada: {empresa!r}")
+            return
 
-    if INGRESAR_A_CONTANET_AUTOMATICO and salida is not None:
-        try:
-            from crear_asientos_conta import ingresar_asiento_contanet
-            print("  >> Ingresando asiento a Contanet...")
-            ingresar_asiento_contanet(salida, ruc_cliente=ruc or "20376729126", anio=str(anio))
-            print("  >> [OK] Asiento ingresado exitosamente en Contanet.")
-        except Exception as e_ing:
-            print(f"  [AVISO] No se pudo ingresar a Contanet automáticamente: {e_ing}")
-    else:
-        print("  >> [INFO] El ingreso en Contanet se mantiene separado del flujo.")
-        print("     (El archivo generado queda listo para importación manual o posterior conexión).")
+        nombre_archivo = Path(salida).name
+        print()
+        while True:
+            resp = input(f"¿Desea ingresar el archivo {nombre_archivo} en Contanet? (s/n): ").strip().lower()
+            if resp in ("s", "si", "sí", "y", "yes"):
+                desea_ingresar = True
+                break
+            elif resp in ("n", "no"):
+                desea_ingresar = False
+                break
+            print("  X Opción inválida. Ingrese 's' para Sí o 'n' para No.\n")
+
+        if desea_ingresar:
+            try:
+                from crear_asientos_conta import ingresar_asiento_contanet
+                print("  >> Ingresando asiento a Contanet...")
+                ingresar_asiento_contanet(salida, ruc_cliente=ruc, anio=str(anio))
+                print("  >> [OK] Asiento ingresado exitosamente en Contanet.")
+            except Exception as e_ing:
+                print(f"  [AVISO] No se pudo ingresar a Contanet automáticamente: {e_ing}")
+        else:
+            print("  >> [INFO] No se ingresó el archivo en Contanet.")
+            print(f"     (El archivo generado queda listo para importación manual: {nombre_archivo})")
 
 
 # ══════════════════════════════════════════════════════════

@@ -366,7 +366,7 @@ def _buscar_fila_encabezados_destino(hoja: Worksheet) -> tuple[int, dict[str, in
         "monto_haber_me": ("Monto Haber ME",),
         "cambio_moneda": ("Cambio Moneda",),
     }
-    centros_costo: dict[str, tuple[str, ...]] = {
+    columnas_opcionales: dict[str, tuple[str, ...]] = {
         "cod_centro": (
             "Cod. Centro", "Cod Centro", "Cod. Centro C.", "Cod Centro C",
             "Codigo Centro Costo", "Código Centro Costo", "Codigo Centro", "Código Centro",
@@ -380,6 +380,17 @@ def _buscar_fila_encabezados_destino(hoja: Worksheet) -> tuple[int, dict[str, in
             "Cod. Sub. Centro Costo", "Cod Sub Centro Costo",
             "Sub Centro Costo", "Sub Centro",
         ),
+        "id_ctr_mda": (
+            "Identificador Ctr Mda",
+            "Identificador Ctr Mda.",
+            "Identificador Ctr. Mda.",
+            "Identificador Ctr. Mda",
+            "Identificador Ctr Moneda",
+            "Identificador Ctr. Moneda",
+            "Identificador Control Moneda",
+            "Id Ctr Mda",
+            "Id. Ctr. Mda.",
+        ),
     }
 
     for numero_fila in range(1, min(hoja.max_row, 30) + 1):
@@ -391,8 +402,8 @@ def _buscar_fila_encabezados_destino(hoja: Worksheet) -> tuple[int, dict[str, in
                     hallados[clave] = numero_columna
                     break
         if set(requeridos) <= set(hallados):
-            # Buscar columnas de Centro y Sub Centro de Costo (ej. Cod. Centro C. / Codigo Centro Costo)
-            for clave, alias in centros_costo.items():
+            # Buscar columnas de Centro, Sub Centro de Costo e Identificador Ctr Mda
+            for clave, alias in columnas_opcionales.items():
                 if clave not in hallados:
                     for fila_chk in (numero_fila, numero_fila - 1, numero_fila - 2, numero_fila + 1):
                         if 1 <= fila_chk <= hoja.max_row:
@@ -408,6 +419,8 @@ def _buscar_fila_encabezados_destino(hoja: Worksheet) -> tuple[int, dict[str, in
                 hallados["cod_centro"] = 20
             if "cod_sub_centro" not in hallados and hoja.max_column >= 21:
                 hallados["cod_sub_centro"] = 21
+            if "id_ctr_mda" not in hallados and hoja.max_column >= 26:
+                hallados["id_ctr_mda"] = 26
 
             return numero_fila, hallados
 
@@ -726,6 +739,27 @@ def _montos_asiento(
     return empresa, banco
 
 
+def _determinar_id_ctr_mda(
+    moneda_normalizada: str,
+    monto_mn: Decimal,
+    monto_me: Decimal,
+) -> str:
+    """Determina el valor para la columna 'Identificador Ctr Mda.'.
+
+    Regla:
+    Si uno de los asientos al ser cambiado a la otra moneda sale 0
+    (debido a que se redondea a 2 decimales y queda en 0.00):
+      1. Si la moneda original es soles (MN) y en dólares (ME) sale 0 -> 's'
+      2. Si la moneda original es dólares (ME) y en soles (MN) sale 0 -> '$'
+    En cualquier otro caso se mantiene el valor por defecto -> 'a'.
+    """
+    if moneda_normalizada == "MN" and monto_me == Decimal("0"):
+        return "s"
+    if moneda_normalizada == "ME" and monto_mn == Decimal("0"):
+        return "$"
+    return "a"
+
+
 def _escribir_fila(
     hoja: Worksheet,
     fila: int,
@@ -740,6 +774,7 @@ def _escribir_fila(
     tc_venta: Decimal,
     cod_centro: str = "",
     cod_sub_centro: str = "",
+    id_ctr_mda: str = "a",
 ) -> None:
     """Escribe únicamente los campos variables definidos por la regla contable."""
     valores: dict[str, Any] = {
@@ -764,9 +799,165 @@ def _escribir_fila(
         valores["cod_centro"] = cod_centro
     if cod_sub_centro and "cod_sub_centro" in columnas:
         valores["cod_sub_centro"] = cod_sub_centro
+    if "id_ctr_mda" in columnas:
+        valores["id_ctr_mda"] = id_ctr_mda
 
     for campo, valor in valores.items():
         hoja.cell(fila, columnas[campo]).value = valor
+
+
+_PATRON_COMIS_MANT = re.compile(
+    r"comis.*manten|manten.*comis|com\.manten|com\.mantenim",
+    re.IGNORECASE,
+)
+
+
+def _buscar_asiento_ya_registrado(
+    ruta_cbf: Path,
+    movimientos: "list[MovimientoITFComision]",
+) -> tuple[bool, str]:
+    """Comprueba si las comisiones bancarias ya tienen asiento contable registrado.
+
+    Busca en la hoja ``Anexar1`` del CBF filas de contabilidad (sin par bancario)
+    cuya glosa o giro coincida con el patrón "COMISION MANTEN..." (comisión bancaria
+    mensual del banco) y cuyo monto absoluto sea igual al total absoluto de todas
+    las comisiones de la lista de movimientos.
+
+    La lógica es:
+    - La hoja ITF Y COM contiene las comisiones bancarias cobradas por el banco
+      (TRANSFERENCIA CCE, COM.MANTENIM, ENVIO.EST.CTA, etc.).
+    - En el Anexar1 puede existir una fila conta suelta (sin par bancario) con
+      glosa "COMISION MANTENIMIENTO XXX" que registra en contabilidad el monto
+      total de todas esas comisiones.
+    - Si ``abs(monto_fila_conta) == total_comisiones_banco``, el asiento ya fue
+      registrado y no debe generarse uno nuevo.
+
+    Parameters
+    ----------
+    ruta_cbf:
+        Ruta del archivo CBF (conciliación final) que contiene la hoja
+        ``Anexar1``.
+    movimientos:
+        Lista de movimientos leída de la hoja ``ITF Y COM`` del CBF, filtrada
+        únicamente a los de tipo ``COMISION``.
+
+    Returns
+    -------
+    tuple[bool, str]
+        ``(True, descripción)`` si el asiento ya está registrado y no debe
+        generarse; ``(False, '')`` en caso contrario.
+    """
+    # Solo se evalúan los movimientos de tipo COMISION (no ITF)
+    comisiones = [m for m in movimientos if m.tipo == "COMISION"]
+    if not comisiones:
+        return False, ""
+
+    total_com = sum(abs(m.monto) for m in comisiones)
+    if total_com == 0:
+        return False, ""
+
+    # No dividimos entre 2: comparamos directamente el total de comisiones del banco
+    # con el monto de la fila conta de referencia. Si son iguales, el asiento ya existe.
+
+    # Intentar leer la hoja Anexar1 del CBF
+    if not ruta_cbf.is_file():
+        return False, ""
+
+    try:
+        libro_cbf = load_workbook(ruta_cbf, read_only=True, data_only=True)
+        hoja_anexar = None
+        for nombre in libro_cbf.sheetnames:
+            if nombre.strip().lower() == "anexar1":
+                hoja_anexar = libro_cbf[nombre]
+                break
+        if hoja_anexar is None:
+            libro_cbf.close()
+            return False, ""
+
+        # Identificar columnas de glosa, giro y monto-conta en la primera fila.
+        # Los encabezados reales tienen guiones y espacios: 'Conta - Glosa',
+        # 'Conta - Giro', 'Monto-Conta'. Se normalizan eliminando guiones y
+        # colapsando espacios múltiples para cubrir todas las variantes.
+        col_glosa = col_giro = col_monto = None
+        for c in range(1, hoja_anexar.max_column + 1):
+            encabezado = _normalizar(hoja_anexar.cell(1, c).value)
+            # Quitar guiones y colapsar espacios múltiples
+            enc_limpio = " ".join(encabezado.replace("-", " ").split())
+            if enc_limpio in ("CONTA GLOSA", "GLOSA"):
+                col_glosa = c
+            elif enc_limpio in ("CONTA GIRO", "GIRO"):
+                col_giro = c
+            elif enc_limpio in ("MONTO CONTA", "MONTO CONTABILIDAD"):
+                col_monto = c
+
+        if col_monto is None:
+            libro_cbf.close()
+            return False, ""
+
+        # Recorrer filas buscando el patrón de comisión bancaria mensual
+        for fila in range(2, hoja_anexar.max_row + 1):
+            # Revisar glosa primero, luego giro
+            texto_glosa = str(hoja_anexar.cell(fila, col_glosa).value or "") if col_glosa else ""
+            texto_giro  = str(hoja_anexar.cell(fila, col_giro).value  or "") if col_giro  else ""
+
+            texto_match = ""
+            if _PATRON_COMIS_MANT.search(texto_glosa):
+                texto_match = texto_glosa.strip()
+            elif _PATRON_COMIS_MANT.search(texto_giro):
+                texto_match = texto_giro.strip()
+
+            if not texto_match:
+                continue
+
+            # Hay una fila con el patrón; verificar su monto
+            val_monto = hoja_anexar.cell(fila, col_monto).value
+            try:
+                monto_conta = _a_decimal(val_monto, campo="Monto-Conta en Anexar1")
+            except ErrorAsientoITFComisiones:
+                continue
+
+            monto_abs = abs(monto_conta).quantize(CENTAVOS, rounding=ROUND_HALF_UP)
+            total_com_dec = total_com.quantize(CENTAVOS, rounding=ROUND_HALF_UP)
+
+            # Condición: el monto ya registrado en conta == total de comisiones del banco
+            if abs(monto_abs - total_com_dec) <= Decimal("0.02"):
+                libro_cbf.close()
+                return (
+                    True,
+                    f"'{texto_match}' (monto conta {monto_conta:+.2f} == "
+                    f"total comisiones {-total_com:.2f}). "
+                    "El asiento de comisiones ya está registrado en contabilidad.",
+                )
+
+        libro_cbf.close()
+    except Exception:
+        pass
+
+    return False, ""
+
+
+_MESES_NUM: dict[str, int] = {
+    "ENERO": 1, "FEBRERO": 2, "MARZO": 3, "ABRIL": 4,
+    "MAYO": 5, "JUNIO": 6, "JULIO": 7, "AGOSTO": 8,
+    "SETIEMBRE": 9, "SEPTIEMBRE": 9, "OCTUBRE": 10,
+    "NOVIEMBRE": 11, "DICIEMBRE": 12,
+}
+
+
+def _detectar_fecha_cierre_cbf(ruta_final: Path, movimientos: list[MovimientoITFComision]) -> date | None:
+    """Determina la fecha de cierre del mes en consulta a partir del nombre del archivo o movimientos."""
+    stem = ruta_final.stem.upper()
+    patron_meses = "|".join(_MESES_NUM.keys())
+    m = re.search(rf"({patron_meses})_(\d{{4}})", stem)
+    if m:
+        nombre_mes = m.group(1)
+        anio = int(m.group(2))
+        mes = _MESES_NUM.get(nombre_mes, 0)
+        if mes:
+            return date(anio, mes, monthrange(anio, mes)[1])
+    if movimientos:
+        return max(ultimo_dia_mes(m.fecha) for m in movimientos)
+    return None
 
 
 def generar_asientos_itf_comisiones(
@@ -779,13 +970,14 @@ def generar_asientos_itf_comisiones(
     ruta_salida: str | Path | None = None,
     cuentas_personalizadas: Mapping[tuple[str, str], Mapping[str, str]] | None = None,
     empresa: str | None = None,
+    fecha_cierre: date | None = None,
 ) -> Path:
     """Genera y guarda la plantilla de importación de ITF y comisiones.
 
     Cada movimiento crea dos filas consecutivas (empresa y banco) con correlativo
     secuencial (1, 2, 3...). Ambas filas comparten el número de ``Relacionado`` del
-    asiento. Los cinco campos de fecha reciben el último día del mes de la
-    operación; los montos se generan en MN y ME usando el TC Venta del cierre.
+    asiento. Los cinco campos de fecha reciben el último día del mes en consulta;
+    los montos se generan en MN y ME usando el TC Venta del cierre en consulta.
     Si la plantilla incluye ``ImportCONTABILIDAD``, se sincroniza automáticamente.
 
     Parameters
@@ -795,6 +987,9 @@ def generar_asientos_itf_comisiones(
         buscar las cuentas contables en ``cuentas_banco.json``. Si no se
         indica, se intentará detectar desde el nombre del archivo o se
         utilizan las cuentas del diccionario ``CUENTAS`` (fallback).
+    fecha_cierre:
+        Fecha de cierre del mes en consulta. Si no se indica, se detecta del
+        nombre del CBF o del movimiento más reciente.
     """
     ruta_final = Path(ruta_conciliacion_final).expanduser().resolve()
     plantilla = Path(ruta_plantilla).expanduser().resolve()
@@ -810,21 +1005,52 @@ def generar_asientos_itf_comisiones(
         empresa = _resolver_clave_empresa(empresa, empresas_registradas) or empresa
 
     movimientos = leer_movimientos_itf_comisiones(ruta_final)
+
+    # ── Validar si las comisiones ya tienen asiento registrado en contabilidad ──
+    # Si en la hoja Anexar1 del CBF existe una fila conta con glosa/giro que
+    # contenga "COMISION MANTEN..." y su monto absoluto es exactamente la mitad
+    # del total de comisiones (lo que indica que banco y contabilidad están
+    # equilibrados), el asiento ya fue registrado y no debe regenerarse.
+    ya_registrado, motivo = _buscar_asiento_ya_registrado(ruta_final, movimientos)
+    if ya_registrado:
+        print(
+            f"\n  [INFO] Se omite la generación del asiento de comisiones.\n"
+            f"  Motivo: {motivo}\n"
+        )
+        return None  # type: ignore[return-value]
+
     moneda_normalizada = _normalizar_moneda(moneda)
     cuentas = _cuentas_para(banco, moneda_normalizada, cuentas_personalizadas, empresa=empresa)
     cod_centro = cuentas.get("cc") or ""
     cod_sub_centro = cuentas.get("scc") or ""
 
+    if fecha_cierre is None:
+        fecha_cierre = _detectar_fecha_cierre_cbf(ruta_final, movimientos)
+
     cierres = {ultimo_dia_mes(movimiento.fecha) for movimiento in movimientos}
-    if len(cierres) > 1 and not callable(tipo_cambio_venta) and not isinstance(tipo_cambio_venta, Mapping):
-        raise TipoCambioNoDisponibleError(
-            "La conciliación contiene más de un mes. Indique un TC Venta de "
-            "Contanet por cada cierre mensual mediante un diccionario o función."
-        )
-    tipos_cambio = {
-        cierre: _resolver_tc_venta(tipo_cambio_venta, cierre)
-        for cierre in cierres
-    }
+    if fecha_cierre:
+        cierres.add(fecha_cierre)
+
+    # Aunque la conciliación contenga movimientos de meses anteriores, se concilian
+    # con movimientos del mes en consulta, por lo que el tipo de cambio y la fecha
+    # de corte corresponden al mes en consulta.
+    es_escalar = not callable(tipo_cambio_venta) and not isinstance(tipo_cambio_venta, Mapping)
+    if es_escalar:
+        ref_cierre = fecha_cierre or (next(iter(cierres)) if cierres else date.today())
+        tc_unico = _resolver_tc_venta(tipo_cambio_venta, ref_cierre)
+        tipos_cambio = {cierre: tc_unico for cierre in cierres}
+    else:
+        tipos_cambio = {}
+        for cierre in cierres:
+            try:
+                tipos_cambio[cierre] = _resolver_tc_venta(tipo_cambio_venta, cierre)
+            except TipoCambioNoDisponibleError:
+                if fecha_cierre and fecha_cierre in tipos_cambio:
+                    tipos_cambio[cierre] = tipos_cambio[fecha_cierre]
+                elif fecha_cierre:
+                    tipos_cambio[cierre] = _resolver_tc_venta(tipo_cambio_venta, fecha_cierre)
+                else:
+                    raise
 
     if ruta_salida is None:
         ruta_salida = ruta_final.with_name(
@@ -869,8 +1095,12 @@ def generar_asientos_itf_comisiones(
         fila_destino = fila_modelo
         correlativo = 0
         for relacionado, movimiento in enumerate(movimientos, start=1):
-            fecha_cierre = ultimo_dia_mes(movimiento.fecha)
-            tc_venta = tipos_cambio[fecha_cierre]
+            fecha_mov_cierre = ultimo_dia_mes(movimiento.fecha)
+            fecha_registro_asiento = fecha_cierre or fecha_mov_cierre
+            tc_venta = tipos_cambio.get(fecha_registro_asiento) or tipos_cambio.get(fecha_mov_cierre)
+            if tc_venta is None:
+                tc_venta = _resolver_tc_venta(tipo_cambio_venta, fecha_registro_asiento)
+
             # Seleccionar la cuenta de empresa según el tipo de movimiento:
             # ITF → cuenta_itf, TRANFERENCIA CCE → cuenta_cce (si existe), COMISION → empresa
             if movimiento.tipo == "ITF":
@@ -884,6 +1114,10 @@ def generar_asientos_itf_comisiones(
                 movimiento.monto, moneda_normalizada, tc_venta
             )
 
+            monto_mn = max(montos_banco["monto_debe"], montos_banco["monto_haber"])
+            monto_me = max(montos_banco["monto_debe_me"], montos_banco["monto_haber_me"])
+            id_ctr_mda = _determinar_id_ctr_mda(moneda_normalizada, monto_mn, monto_me)
+
             correlativo += 1
             _escribir_fila(
                 hoja,
@@ -891,13 +1125,14 @@ def generar_asientos_itf_comisiones(
                 columnas,
                 correlativo=correlativo,
                 relacionado=relacionado,
-                fecha=fecha_cierre,
+                fecha=fecha_registro_asiento,
                 cuenta=cuenta_empresa,
                 glosa=movimiento.descripcion,
                 montos=montos_empresa,
                 tc_venta=tc_venta,
                 cod_centro=cod_centro,
                 cod_sub_centro=cod_sub_centro,
+                id_ctr_mda=id_ctr_mda,
             )
             fila_destino += 1
 
@@ -908,13 +1143,14 @@ def generar_asientos_itf_comisiones(
                 columnas,
                 correlativo=correlativo,
                 relacionado=relacionado,
-                fecha=fecha_cierre,
+                fecha=fecha_registro_asiento,
                 cuenta=cuentas["banco"],
                 glosa=movimiento.descripcion,
                 montos=montos_banco,
                 tc_venta=tc_venta,
                 cod_centro=cod_centro,
                 cod_sub_centro=cod_sub_centro,
+                id_ctr_mda=id_ctr_mda,
             )
             fila_destino += 1
 

@@ -201,6 +201,15 @@ def ingresar_asiento_contanet(
 
 if __name__ == '__main__':
     # Ejecución manual y separada del flujo general
-    print("Iniciando ingreso en Contanet de manera independiente...")
-    ingresar_asiento_contanet()
+    archivo_defecto = 'Plantilla comisiones 06-2026 Bcp Dolares.xlsm'
+    while True:
+        resp = input(f"¿Desea ingresar el archivo {archivo_defecto} en Contanet? (s/n): ").strip().lower()
+        if resp in ("s", "si", "sí", "y", "yes"):
+            print("Iniciando ingreso en Contanet de manera independiente...")
+            ingresar_asiento_contanet(archivo_defecto)
+            break
+        elif resp in ("n", "no"):
+            print("Operación cancelada. No se abrió Contanet.")
+            break
+        print("Opción inválida. Ingrese 's' para Sí o 'n' para No.")
 

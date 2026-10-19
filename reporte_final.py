@@ -23,6 +23,7 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 import openpyxl
+import re
 from openpyxl.styles import (
     Font, PatternFill, Alignment, Border, Side
 )
@@ -123,13 +124,22 @@ def generar_reporte_final(
     # Convertir fechas
     anexar1['Fecha'] = pd.to_datetime(anexar1['Fecha'], dayfirst=True, errors='coerce')
 
-    # Normalizar MAR: cualquier valor no nulo se trata como 'X'
+    # Normalizar MAR:
+    #   'X' → conciliado por el especialista o automático
+    #   'Y' → COMISION MANTENIMIENTO marcada automáticamente (RESERVADO, no editar)
+    #   cualquier otro valor no nulo → se convierte en 'X'
     if 'MAR' in anexar1.columns:
-        anexar1['MAR'] = anexar1['MAR'].apply(
-            lambda v: 'X' if pd.notna(v) and str(v).strip() not in ('', '0', 'nan') else ''
-        )
+        def _normalizar_mar(v):
+            if pd.isna(v) or str(v).strip() in ('', '0', 'nan'):
+                return ''
+            val = str(v).strip().upper()
+            if val == 'Y':
+                return 'Y'  # preservar marca de COMISION MANTENIMIENTO
+            return 'X'
+        anexar1['MAR'] = anexar1['MAR'].apply(_normalizar_mar)
     else:
         anexar1['MAR'] = ''
+
 
     # ── 1. PRIORIDAD ABSOLUTA: Vincular filas por códigos comunes (letras, números o combinaciones) ────────
     # Se revisan todas las columnas que el usuario o el sistema puedan usar para vincular:
@@ -719,16 +729,24 @@ def _clasificar_partidas(
         return resultado
 
     # Partidas de contabilidad sin par bancario
+    # ── Excluir filas de COMISION MANTENIMIENTO (MAR='Y') ───────────────
+    # Esas filas se manejan de forma especial en la validación de comisiones
+    # y NO deben aparecer como partidas abiertas en la conciliación final.
+    _mask_mar_y = conta_sin_marcar['MAR'].astype(str).str.strip().str.upper() == 'Y' \
+        if 'MAR' in conta_sin_marcar.columns else pd.Series([False] * len(conta_sin_marcar), index=conta_sin_marcar.index)
+    conta_sin_marcar_partidas = conta_sin_marcar[~_mask_mar_y]
+
     abonos_lib_no_ext = to_lista(
-        conta_sin_marcar, 'Monto-Conta', 'Fecha',
+        conta_sin_marcar_partidas, 'Monto-Conta', 'Fecha',
         'Conta - Glosa', 'Conta - # Operación', positivo=True, es_conta=True
     )
     # Cargos en Libros: montos negativos en conta → se muestran con signo INVERTIDO (positivos)
     # porque en el formato de conciliación suman al saldo libro bancos.
     cargos_lib_no_ext = to_lista(
-        conta_sin_marcar, 'Monto-Conta', 'Fecha',
+        conta_sin_marcar_partidas, 'Monto-Conta', 'Fecha',
         'Conta - Glosa', 'Conta - # Operación', positivo=False, es_conta=True, invertir_signo=True, mantener_signo=False
     )
+
 
     # Partidas bancarias sin par contable
     # ── Excluir filas clasificadas como ITF o Comisiones para evitar duplicados ──
@@ -765,9 +783,10 @@ def _clasificar_partidas(
         'Banco - Descripción', 'Banco - # Operación'
     )
     solo_conta_todas = todas(
-        conta_sin_marcar, 'Monto-Conta', 'Fecha',
+        conta_sin_marcar_partidas, 'Monto-Conta', 'Fecha',
         'Conta - Glosa', 'Conta - # Operación', es_conta=True
     )
+
 
     # ── Extraer ITF, Comisiones, Error y Otros desde Anexar1 ────────────
     # Se capturan tanto las vinculaciones manuales (códigos 'A', 'B', etc.)
@@ -816,6 +835,9 @@ def _clasificar_partidas(
     grupos_manual: dict[str, list[int]] = {}
     valores_excluidos = {'x', 'si', '1', 'conciliados', '', 'nan'}
 
+    # Columna de vinculación manual del especialista (# Operación a Conciliar)
+    col_vinc_manual = '# Operación a Conciliar' if '# Operación a Conciliar' in df_anexar_src.columns else None
+
     for idx, row in df_anexar_src.iterrows():
         op2 = _texto(row.get('# Operación2'))
         if op2.startswith('MANUAL-'):
@@ -859,14 +881,24 @@ def _clasificar_partidas(
         total_c = sum(_monto(r.get('Monto-Conta')) for r in conta_filas)
         dif_grupo = round(total_b - total_c, 2)
 
-        # Si alguna fila del grupo tiene un DIF COMISON explícito no cero, respetarlo
+        # Si alguna fila del grupo tiene un DIF COMISON explícito no cero, respetarlo.
+        # EXCEPCIÓN: si el grupo tiene solo una fila banco y una fila conta
+        # (1-a-1 reasignado manualmente), el DIF COMISON de la fila banco puede ser
+        # un residuo del sugerido original. Solo respetarlo cuando el grupo tiene
+        # exactamente un banco y su dif_grupo (diferencia real) también coincide con
+        # el valor DIF COMISON.
         dif_exp = None
         if col_dif:
             for r in filas_grupo:
                 v = r.get(col_dif)
                 try:
                     if pd.notna(v) and float(v) != 0.0:
-                        dif_exp = float(v)
+                        candidato = float(v)
+                        # Validar que el DIF COMISON explícito coincida con la diferencia
+                        # real del grupo (tolerancia 0.02 para redondeos). Si no coincide,
+                        # es un residuo del sugerido original y no debe usarse.
+                        if abs(abs(candidato) - abs(dif_grupo)) <= 0.02:
+                            dif_exp = candidato
                         break
                 except (ValueError, TypeError):
                     pass
@@ -880,6 +912,11 @@ def _clasificar_partidas(
 
         # Si no se marcó ninguna clasificación, no debe fluir a ninguna pestaña de ajuste
         if not (es_itf or es_com or es_err or es_otr):
+            continue
+
+        # FIX Problema 2 (grupos): si la diferencia real del grupo es 0, el par bancario
+        # y contable cuadran exactamente → ya está completamente conciliado, no genera asiento.
+        if monto_final == 0.0:
             continue
 
         fila_rep = banco_filas[0] if banco_filas else filas_grupo[0]
@@ -919,17 +956,51 @@ def _clasificar_partidas(
         if idx in indices_en_grupo:
             continue
 
-        # Si la fila ya fue conciliada (MAR='X') y su clasificación es SOLO ITF,
-        # no debe aparecer en la hoja ITF y Comisiones.
-        # Comisiones/Error/Otros sí deben mostrarse aunque estén conciliados,
-        # porque el asiento contable se hace por la diferencia de monto.
+        # Si la fila ya fue conciliada (MAR='X'), verificar si debe generar asiento:
+        #
+        # Caso A – Solo ITF:
+        #   El ITF ya está conciliado 1-a-1 contra la contabilidad → no genera asiento.
+        #
+        # Caso B – Comisiones/Error/Otros con MAR='X':
+        #   Solo genera asiento si hay una diferencia real de monto (DIF COMISON ≠ 0
+        #   o monto_banco ≠ monto_conta). Si la diferencia es 0 significa que el
+        #   especialista ya concilió completamente este movimiento (incluyendo el asiento)
+        #   y no debe generarse un nuevo asiento duplicado.
         if _texto(row.get('MAR')).upper() == 'X':
             es_itf_ind  = _marcado(row, col_itf)
             es_com_ind  = _marcado(row, col_com)
             es_err_ind  = _marcado(row, col_err)
             es_otr_ind  = _marcado(row, col_otr)
+
+            # ITF puro conciliado → siempre excluir
             if es_itf_ind and not (es_com_ind or es_err_ind or es_otr_ind):
                 continue
+
+            # Comisiones/Error/Otros conciliados: solo incluir si hay diferencia real
+            if es_com_ind or es_err_ind or es_otr_ind:
+                dif_raw_chk = row.get(col_dif) if col_dif else None
+                try:
+                    dif_chk = float(dif_raw_chk) if pd.notna(dif_raw_chk) and str(dif_raw_chk) not in ('', 'nan') else 0.0
+                except (ValueError, TypeError):
+                    dif_chk = 0.0
+
+                if dif_chk == 0.0:
+                    mb_chk = _monto(row.get('Monto-Banco'))
+                    mc_chk = _monto(row.get('Monto-Conta'))
+                    # Si hay ambos montos, la diferencia real es mb - mc
+                    if mb_chk != 0.0 and mc_chk != 0.0:
+                        dif_chk = round(mb_chk - mc_chk, 2)
+                    # Si solo hay un lado (fila solo banco o solo conta), la diferencia
+                    # real se calculará en el contexto del grupo manual al que pertenece.
+                    # Aquí, como fila individual con un solo monto y DIF COMISON=0,
+                    # el monto completo sería el asiento, lo cual es incorrecto si ya
+                    # está conciliado como parte de un grupo. Excluirla es lo correcto.
+                    else:
+                        continue
+
+                if dif_chk == 0.0:
+                    # Sin diferencia real → ya completamente conciliado, no genera asiento
+                    continue
 
         es_itf = _marcado(row, col_itf)
         es_com = _marcado(row, col_com)
@@ -989,6 +1060,122 @@ def _clasificar_partidas(
         elif es_otr:
             otros_banco.append(partida)
 
+    # ── Validar COMISION MANTENIMIENTO contra suma de ITF + Comisiones bancarias ──
+    #
+    # Flujo completo:
+    #   1. Buscar en Anexar1 la fila de contabilidad marcada con MAR='Y'
+    #      (marcado automático al generar el archivo inicial) que corresponde
+    #      a la entrada "COMISION MANTENIMIENTO XXX" del área contable.
+    #   2. Si no hay fila 'Y', hacer fallback a búsqueda por glosa/giro
+    #      (compatibilidad con archivos generados antes de esta mejora).
+    #   3. Calcular total_banco = sum(|ITF|) + sum(|Comisiones|).
+    #   4. Comparar total_banco con el |monto_contable| de la fila encontrada.
+    #      a) Si coinciden (diferencia ≤ 0.02): la contabilidad ya tiene el
+    #         asiento completo → vaciar itf_banco y comisiones_banco para que
+    #         NO aparezcan en la hoja ITF Y COM ni se genere asiento.
+    #      b) Si hay diferencia: agregar a comisiones_banco una sola partida
+    #         con el importe de la diferencia (lo que falta o sobra).
+    #         El ITF sí puede mantenerse en su sección independiente si el
+    #         asiento contable de COMISION MANTENIMIENTO no los cubre.
+
+    _patron_comis_mant = re.compile(
+        r'comis.*manten|manten.*comis|com\.manten|com\.mantenim',
+        re.IGNORECASE,
+    )
+    col_mar_chk   = next((c for c in ['MAR'] if c in df_anexar_src.columns), None)
+    col_glosa_chk = next((c for c in ['Conta - Glosa', 'Glosa'] if c in df_anexar_src.columns), None)
+    col_giro_chk  = next((c for c in ['Conta - Giro',  'Giro']  if c in df_anexar_src.columns), None)
+    col_mc_chk    = next((c for c in ['Monto-Conta', 'Monto Conta'] if c in df_anexar_src.columns), None)
+    col_fecha_chk = next((c for c in ['Fecha'] if c in df_anexar_src.columns), None)
+
+    # Calcular total absoluto de ITF + Comisiones del banco
+    total_itf_abs = round(sum(abs(p['monto']) for p in itf_banco), 2)
+    total_com_abs = round(sum(abs(p['monto']) for p in comisiones_banco), 2)
+    total_banco_com = round(total_itf_abs + total_com_abs, 2)
+
+    if total_banco_com > 0 and col_mc_chk:
+        # Paso 1: buscar por marca 'Y' (archivo inicial generado con nuevo sistema)
+        fila_com_mant = None
+        monto_com_mant = 0.0
+
+        if col_mar_chk:
+            for _, fila_c in df_anexar_src.iterrows():
+                mar_val = _texto(fila_c.get(col_mar_chk)).upper()
+                if mar_val != 'Y':
+                    continue
+                # Verificar que la glosa/giro también coincida con el patrón
+                texto_glosa = _texto(fila_c.get(col_glosa_chk)) if col_glosa_chk else ''
+                texto_giro  = _texto(fila_c.get(col_giro_chk))  if col_giro_chk  else ''
+                if _patron_comis_mant.search(texto_glosa) or _patron_comis_mant.search(texto_giro):
+                    try:
+                        mc_val = float(fila_c.get(col_mc_chk) or 0)
+                        if mc_val != 0.0:
+                            fila_com_mant = fila_c
+                            monto_com_mant = round(abs(mc_val), 2)
+                            break
+                    except (TypeError, ValueError):
+                        continue
+
+        # Paso 2: fallback por glosa/giro (archivos sin marca 'Y')
+        if fila_com_mant is None:
+            for _, fila_c in df_anexar_src.iterrows():
+                texto_glosa = _texto(fila_c.get(col_glosa_chk)) if col_glosa_chk else ''
+                texto_giro  = _texto(fila_c.get(col_giro_chk))  if col_giro_chk  else ''
+                if not (_patron_comis_mant.search(texto_glosa) or _patron_comis_mant.search(texto_giro)):
+                    continue
+                try:
+                    mc_val = float(fila_c.get(col_mc_chk) or 0)
+                    if mc_val != 0.0:
+                        fila_com_mant = fila_c
+                        monto_com_mant = round(abs(mc_val), 2)
+                        break
+                except (TypeError, ValueError):
+                    continue
+
+        # Paso 3 y 4: validar y actuar según la diferencia
+        if fila_com_mant is not None:
+            diferencia_com = round(total_banco_com - monto_com_mant, 2)
+
+            if abs(diferencia_com) <= 0.02:
+                # Contabilidad ya tiene el asiento completo → no generar nada
+                print(
+                    f"  [INFO] COMISION MANTENIMIENTO: "
+                    f"suma banco ({total_banco_com:.2f}) = monto contable ({monto_com_mant:.2f}). "
+                    f"No se generará asiento en ITF Y COM."
+                )
+                itf_banco        = []
+                comisiones_banco = []
+            else:
+                # Hay diferencia → registrar solo la diferencia en comisiones
+                # Obtener datos de la fila para la descripción
+                desc_dif = _texto(fila_com_mant.get(col_glosa_chk)) if col_glosa_chk else ''
+                if not desc_dif:
+                    desc_dif = _texto(fila_com_mant.get(col_giro_chk)) if col_giro_chk else ''
+                if not desc_dif:
+                    desc_dif = 'COMISION MANTENIMIENTO'
+                fecha_dif = None
+                if col_fecha_chk:
+                    f_raw = fila_com_mant.get(col_fecha_chk)
+                    fecha_dif = pd.to_datetime(f_raw, dayfirst=True, errors='coerce')
+                    if pd.isna(fecha_dif):
+                        fecha_dif = None
+                    else:
+                        fecha_dif = fecha_dif.to_pydatetime()
+
+                print(
+                    f"  [INFO] COMISION MANTENIMIENTO: "
+                    f"suma banco ({total_banco_com:.2f}) ≠ monto contable ({monto_com_mant:.2f}). "
+                    f"Diferencia={diferencia_com:.2f} se agrega a comisiones."
+                )
+                # Vaciar las listas originales y agregar solo la diferencia
+                itf_banco        = []
+                comisiones_banco = [{
+                    'fecha'      : fecha_dif,
+                    'operacion'  : '',
+                    'descripcion': f"Diferencia {desc_dif}",
+                    'monto'      : diferencia_com,
+                }]
+
     return {
         'abonos_lib_no_ext' : abonos_lib_no_ext,
         'cargos_lib_no_ext' : cargos_lib_no_ext,
@@ -1001,6 +1188,7 @@ def _clasificar_partidas(
         'error_banco'       : error_banco,
         'otros_banco'       : otros_banco,
     }
+
 
 
 # ══════════════════════════════════════════════════════════════════════

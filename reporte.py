@@ -195,6 +195,24 @@ def _preparar_tab_contanet(conta: pd.DataFrame) -> pd.DataFrame:
     mask_sin_monto = (df['Ingreso'].fillna(0) == 0) & (df['Egreso'].fillna(0) == 0)
     df['Anotación'] = ''
     df.loc[mask_sin_monto, 'Anotación'] = 'Mov. sin monto (0)'
+
+    # ── Marcado automático con 'Y': COMISION MANTENIMIENTO ───────────────
+    # Buscar filas cuya glosa coincida con el patrón "COMISION MANTENIMIENTO *"
+    # (o variantes como "COM.MANTEN", "COMIS.MANTENIM", etc.) y marcarlas con
+    # MAR='Y' para que el sistema de conciliación final las identifique.
+    # NOTA PARA EL ESPECIALISTA: las letras 'X' e 'Y' están reservadas por el
+    # sistema y NO deben usarse manualmente en la columna MAR.
+    _pat_com_mant_ini = re.compile(
+        r'comis.*manten|manten.*comis|com\.manten|com\.mantenim',
+        re.IGNORECASE,
+    )
+    mask_com_mant = (
+        df['Conta - Glosa'].astype(str).str.contains(_pat_com_mant_ini, na=False) |
+        df['Conta - Giro'].astype(str).str.contains(_pat_com_mant_ini, na=False)
+    ) & ~mask_sin_monto
+    if mask_com_mant.any():
+        df.loc[mask_com_mant, 'MAR'] = 'Y'
+        df.loc[mask_com_mant, 'Anotación'] = 'COMISION MANTENIMIENTO (marcado automático)'
     # Quitar columnas auxiliares de cálculo
     df = df.drop(columns=['Ingreso', 'Egreso'])
     # Propagar bandera de pendiente (movimientos de meses anteriores)
@@ -598,7 +616,7 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
         if len(candidatos_b) == 1:
             b_idx_elegido, dif_elegido = candidatos_b[0]
         elif len(candidatos_b) > 1:
-            cands_fecha = [(b, d) for (b, d) in candidatos_b if banco_ext.at[b, 'Fecha'] == row_c['Fecha']]
+            cands_fecha = [(b, d) for (b, d) in candidatos_b if banco_ext.at[b, 'Fecha'] == conta_ext.at[c_idx, 'Fecha']]
             if len(cands_fecha) == 1:
                 b_idx_elegido, dif_elegido = cands_fecha[0]
 
@@ -702,6 +720,10 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             op_c = _normalizar_nro_op(conta_ext.at[c_idx, 'Conta - # Operación'])
             if op_b and op_c and op_b == op_c:
                 op_link = op_b
+            elif op_b:
+                op_link = op_b   # usar el del banco cuando conta no tiene # Operación
+            elif op_c:
+                op_link = op_c   # usar el de conta cuando banco no tiene # Operación
             else:
                 op_link = f"AUTO-TOK-{b_idx}-{c_idx}"
             banco_ext.at[b_idx, '_matched'] = True
@@ -749,6 +771,10 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
                 op_c = _normalizar_nro_op(conta_ext.at[c_idx, 'Conta - # Operación'])
                 if op_b and op_c and op_b == op_c:
                     op_link = op_b
+                elif op_b:
+                    op_link = op_b   # usar el del banco cuando conta no tiene # Operación
+                elif op_c:
+                    op_link = op_c   # usar el de conta cuando banco no tiene # Operación
                 else:
                     op_link = f"AUTO-DESC-{b_idx}-{c_idx}"
                 banco_ext.at[b_idx, '_matched'] = True
@@ -788,6 +814,10 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             op_c = _normalizar_nro_op(conta_ext.at[c_idx, 'Conta - # Operación'])
             if op_b and op_c and op_b == op_c:
                 op_link = op_b
+            elif op_b:
+                op_link = op_b   # usar el del banco cuando conta no tiene # Operación
+            elif op_c:
+                op_link = op_c   # usar el de conta cuando banco no tiene # Operación
             else:
                 op_link = f"AUTO-MF-{b_idx}-{c_idx}"
             banco_ext.at[b_idx, '# Operación2'] = op_link
