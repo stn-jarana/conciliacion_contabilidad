@@ -512,6 +512,195 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
                         break
         return candidatos
 
+    # ── 0. Regla especial para BANCO DE LA NACIÓN (Agrupación por patrón: Fecha, Operación / Código, Signo) ──
+    # En Banco de la Nación la proporción banco vs contabilidad suele ser de cientos a pocos
+    # (ej. 400 movimientos de detracciones tipo 'VA 1721' contra 1 o 2 asientos en contabilidad).
+    # Se agrupan los movimientos bancarios por (fecha, nro_operacion/código, signo), se calcula la suma
+    # preagregada y se compara contra los registros de contabilidad. Si un solo código no completa el total
+    # de contabilidad, se combinan los códigos restantes.
+    es_banco_nacion = (
+        bool(_re_inline.search(r'(?i)\b(BN|NACION|BANCO\s+DE\s+LA\s+NACION)\b', str(banco))) or
+        banco_ext['Banco - Descripción'].astype(str).str.contains(r'(?i)\bVA\s+\d+\b', regex=True).any()
+    )
+
+    if es_banco_nacion:
+        def _extraer_codigo_bn(desc: str, op: str) -> str:
+            d = str(desc or '').strip()
+            o = str(op or '').strip()
+            m_cod = _re_inline.search(r'(?i)\b([A-Z]{2,4}\s*\d+)\b', d)
+            if m_cod:
+                return _re_inline.sub(r'\s+', ' ', m_cod.group(1).upper())
+            m_op = _re_inline.search(r'(?i)\b([A-Z]{2,4}\s*\d+)\b', o)
+            if m_op:
+                return _re_inline.sub(r'\s+', ' ', m_op.group(1).upper())
+            if d and d not in ('nan', 'none', '0'):
+                return d
+            return o
+
+        b_fechas_dt = pd.to_datetime(banco_ext['Fecha'], dayfirst=True, errors='coerce')
+        c_fechas_dt = pd.to_datetime(conta_ext['Fecha'], dayfirst=True, errors='coerce')
+
+        # Tabla preagregada obtenida de la llave ((fecha, operacion, signo))
+        mask_bn_disp = (~banco_ext['_matched']) & (banco_ext['_monto_r'] != 0)
+        grupos_bn_dict = {}
+        for b_idx in banco_ext[mask_bn_disp].index:
+            fb = b_fechas_dt[b_idx]
+            fb_date = fb.date() if pd.notna(fb) else None
+            mb = banco_ext.at[b_idx, '_monto_r']
+            sig_b = 1 if mb > 0 else -1
+            cod_b = _extraer_codigo_bn(
+                banco_ext.at[b_idx, 'Banco - Descripción'],
+                banco_ext.at[b_idx, 'Banco - # Operación']
+            )
+            llave = (fb_date, cod_b, sig_b)
+            if llave not in grupos_bn_dict:
+                grupos_bn_dict[llave] = {
+                    'fecha': fb_date,
+                    'codigo': cod_b,
+                    'signo': sig_b,
+                    'b_idxs': [],
+                    'suma': 0.0,
+                }
+            grupos_bn_dict[llave]['b_idxs'].append(b_idx)
+            grupos_bn_dict[llave]['suma'] = round(grupos_bn_dict[llave]['suma'] + mb, 2)
+
+        lista_grupos_bn = list(grupos_bn_dict.values())
+
+        # Paso 0.1: Comparar 1 grupo individual contra 1 registro de contabilidad
+        for c_idx in conta_ext.index[~conta_ext['_matched']]:
+            mc = conta_ext.at[c_idx, '_monto_r']
+            if mc == 0:
+                continue
+            sig_c = 1 if mc > 0 else -1
+            fc = c_fechas_dt[c_idx]
+            fc_date = fc.date() if pd.notna(fc) else None
+
+            cands_g = []
+            for g_idx, g in enumerate(lista_grupos_bn):
+                if not g['b_idxs']:
+                    continue
+                if g['signo'] == sig_c and abs(g['suma'] - mc) <= 0.01:
+                    dias_dif = abs((g['fecha'] - fc_date).days) if (g['fecha'] and fc_date) else 999
+                    mismo_mes = (g['fecha'].year == fc_date.year and g['fecha'].month == fc_date.month) if (g['fecha'] and fc_date) else True
+                    if mismo_mes:
+                        cands_g.append((dias_dif, g_idx, g))
+
+            if cands_g:
+                cands_g.sort(key=lambda x: x[0])
+                _, _, g_win = cands_g[0]
+                b_idxs_m = g_win['b_idxs']
+                cod = g_win['codigo']
+                op_c = str(conta_ext.at[c_idx, 'Conta - # Operación'] or '').strip()
+                op_b_first = str(banco_ext.at[b_idxs_m[0], 'Banco - # Operación'] or '').strip()
+                op_link = op_c if (op_c and op_c != 'nan') else (op_b_first if (op_b_first and op_b_first != 'nan') else f"BN-{cod}")
+
+                if len(b_idxs_m) > 1:
+                    anot = f"Auto: {len(b_idxs_m)} Banco = 1 Conta (Detracciones BN {cod})"
+                else:
+                    anot = f"Auto: Banco = Conta (Monto {mc})"
+
+                banco_ext.loc[b_idxs_m, '_matched'] = True
+                conta_ext.at[c_idx, '_matched'] = True
+                banco_ext.loc[b_idxs_m, 'MAR'] = 'X'
+                conta_ext.at[c_idx, 'MAR'] = 'X'
+                banco_ext.loc[b_idxs_m, '# Operación2'] = op_link
+                conta_ext.at[c_idx, '# Operación2'] = op_link
+                banco_ext.loc[b_idxs_m, 'Anotación'] = anot
+                conta_ext.at[c_idx, 'Anotación'] = anot
+                g_win['b_idxs'] = []
+
+        # Paso 0.2: Si un código individual no da el valor total de conta, agregar otros códigos
+        for c_idx in conta_ext.index[~conta_ext['_matched']]:
+            mc = conta_ext.at[c_idx, '_monto_r']
+            if mc == 0:
+                continue
+            sig_c = 1 if mc > 0 else -1
+            fc = c_fechas_dt[c_idx]
+            fc_date = fc.date() if pd.notna(fc) else None
+
+            grupos_disp = [
+                g for g in lista_grupos_bn
+                if g['b_idxs'] and g['signo'] == sig_c and
+                   ((g['fecha'].year == fc_date.year and g['fecha'].month == fc_date.month) if (g['fecha'] and fc_date) else True)
+            ]
+
+            if len(grupos_disp) >= 2:
+                combo_win = None
+                for r_len in range(2, min(len(grupos_disp) + 1, 7)):
+                    for combo in combinations(grupos_disp, r_len):
+                        suma_c = round(sum(g['suma'] for g in combo), 2)
+                        if abs(suma_c - mc) <= 0.01:
+                            combo_win = combo
+                            break
+                    if combo_win:
+                        break
+
+                if combo_win:
+                    b_all = []
+                    cods = []
+                    for g in combo_win:
+                        b_all.extend(g['b_idxs'])
+                        cods.append(g['codigo'])
+                        g['b_idxs'] = []
+
+                    cods_str = "+".join(sorted(set(cods)))
+                    op_c = str(conta_ext.at[c_idx, 'Conta - # Operación'] or '').strip()
+                    op_link = op_c if (op_c and op_c != 'nan') else f"BN-SUMA-{cods_str}"
+                    anot = f"Auto: {len(b_all)} Banco = 1 Conta (Suma Códigos BN {cods_str})"
+
+                    banco_ext.loc[b_all, '_matched'] = True
+                    conta_ext.at[c_idx, '_matched'] = True
+                    banco_ext.loc[b_all, 'MAR'] = 'X'
+                    conta_ext.at[c_idx, 'MAR'] = 'X'
+                    banco_ext.loc[b_all, '# Operación2'] = op_link
+                    conta_ext.at[c_idx, '# Operación2'] = op_link
+                    banco_ext.loc[b_all, 'Anotación'] = anot
+                    conta_ext.at[c_idx, 'Anotación'] = anot
+
+        # Paso 0.3: 1 Grupo BN = N Registros Conta (si un lote de banco se registró en varios asientos)
+        for g in lista_grupos_bn:
+            if not g['b_idxs']:
+                continue
+            suma_g = g['suma']
+            sig_g = g['signo']
+            fg_date = g['fecha']
+            cod = g['codigo']
+
+            unm_c_cands = [
+                c_idx for c_idx in conta_ext.index[~conta_ext['_matched']]
+                if (1 if conta_ext.at[c_idx, '_monto_r'] > 0 else -1) == sig_g and
+                   ((c_fechas_dt[c_idx].date().year == fg_date.year and c_fechas_dt[c_idx].date().month == fg_date.month) if (fg_date and pd.notna(c_fechas_dt[c_idx])) else True)
+            ]
+
+            if len(unm_c_cands) >= 2:
+                combo_c_win = None
+                for r_len in range(2, min(len(unm_c_cands) + 1, 6)):
+                    for combo in combinations(unm_c_cands, r_len):
+                        suma_c = round(sum(conta_ext.at[c, '_monto_r'] for c in combo), 2)
+                        if abs(suma_c - suma_g) <= 0.01:
+                            combo_c_win = combo
+                            break
+                    if combo_c_win:
+                        break
+
+                if combo_c_win:
+                    b_idxs_m = g['b_idxs']
+                    op_link = f"BN-{cod}"
+                    anot = f"Auto: {len(b_idxs_m)} Banco = {len(combo_c_win)} Conta (Lote BN {cod})"
+
+                    banco_ext.loc[b_idxs_m, '_matched'] = True
+                    banco_ext.loc[b_idxs_m, 'MAR'] = 'X'
+                    banco_ext.loc[b_idxs_m, '# Operación2'] = op_link
+                    banco_ext.loc[b_idxs_m, 'Anotación'] = anot
+
+                    for c_idx in combo_c_win:
+                        conta_ext.at[c_idx, '_matched'] = True
+                        conta_ext.at[c_idx, 'MAR'] = 'X'
+                        conta_ext.at[c_idx, '# Operación2'] = op_link
+                        conta_ext.at[c_idx, 'Anotación'] = anot
+
+                    g['b_idxs'] = []
+
     # 1. Reglas por coincidencia de # Operación (exacto o sufijo)
     # 1.1 Mismo valor (Monto igual) -> Conciliación automática con "Auto: Sufijo de # Operación"
     suf6_idx = _rebuild_suf6_index()
@@ -966,7 +1155,10 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
                 if x[0] not in used_c and (x[1] > 0) == (b_amt > 0)
                 and bool(conta_ext.at[x[0], '_es_itf']) == b_es_itf
             ]
-            combo_idxs, diff_val = _buscar_combinacion_suma_eficiente(b_amt, avail_c, {0.0}, min_elementos=2, max_elementos=6)
+            # Límite de seguridad: skip si el pool es muy grande (evita explosión combinatoria)
+            if len(avail_c) > 20:
+                continue
+            combo_idxs, diff_val = _buscar_combinacion_suma_eficiente(b_amt, avail_c, {0.0}, min_elementos=2, max_elementos=3)
             if combo_idxs:
                 used_c.update(combo_idxs)
                 op_link = f"SUG-SUM-B{b_idx}"
@@ -992,7 +1184,10 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
                 if x[0] not in used_b and (x[1] > 0) == (c_amt > 0)
                 and bool(banco_ext.at[x[0], '_es_itf']) == c_es_itf
             ]
-            combo_idxs, diff_val = _buscar_combinacion_suma_eficiente(c_amt, avail_b, {0.0}, min_elementos=2, max_elementos=6)
+            # Límite de seguridad: skip si el pool es muy grande (evita explosión combinatoria)
+            if len(avail_b) > 20:
+                continue
+            combo_idxs, diff_val = _buscar_combinacion_suma_eficiente(c_amt, avail_b, {0.0}, min_elementos=2, max_elementos=3)
             if combo_idxs:
                 used_b.update(combo_idxs)
                 op_link = f"SUG-SUM-C{c_idx}"
@@ -1031,7 +1226,10 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             if x[0] not in _used_c_global and (x[1] > 0) == (b_amt > 0)
             and bool(conta_ext.at[x[0], '_es_itf']) == b_es_itf
         ]
-        combo_idxs, diff_val = _buscar_combinacion_suma_eficiente(b_amt, avail_c, {0.0}, min_elementos=2, max_elementos=6)
+        # Límite de seguridad: skip si el pool global es muy grande (evita explosión combinatoria)
+        if len(avail_c) > 25:
+            continue
+        combo_idxs, diff_val = _buscar_combinacion_suma_eficiente(b_amt, avail_c, {0.0}, min_elementos=2, max_elementos=3)
         if combo_idxs:
             _used_c_global.update(combo_idxs)
             op_link = f"SUG-SUM-B{b_idx}"
@@ -1054,7 +1252,10 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             if x[0] not in _used_b_global and (x[1] > 0) == (c_amt > 0)
             and bool(banco_ext.at[x[0], '_es_itf']) == c_es_itf
         ]
-        combo_idxs, diff_val = _buscar_combinacion_suma_eficiente(c_amt, avail_b, {0.0}, min_elementos=2, max_elementos=6)
+        # Límite de seguridad: skip si el pool global es muy grande (evita explosión combinatoria)
+        if len(avail_b) > 25:
+            continue
+        combo_idxs, diff_val = _buscar_combinacion_suma_eficiente(c_amt, avail_b, {0.0}, min_elementos=2, max_elementos=3)
         if combo_idxs:
             _used_b_global.update(combo_idxs)
             op_link = f"SUG-SUM-C{c_idx}"
@@ -1158,9 +1359,13 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
             diff = round(abs(abs(m_c) - abs(suma_b)), 2)
             if diff <= 0.01:
                 f_c = row_c.get('Fecha')
+                f_c_dt = pd.to_datetime(f_c, dayfirst=True, errors='coerce')
                 dias_min = None
-                if pd.notna(f_c) and fechas_b:
-                    dias_min = min(abs((f_c - fb).days) for fb in fechas_b)
+                if pd.notna(f_c_dt) and fechas_b:
+                    fechas_b_dt = [pd.to_datetime(fb, dayfirst=True, errors='coerce') for fb in fechas_b]
+                    fechas_b_dt = [fb for fb in fechas_b_dt if pd.notna(fb)]
+                    if fechas_b_dt:
+                        dias_min = min(abs((f_c_dt - fb).days) for fb in fechas_b_dt)
                 cands_c.append((c_idx, diff, dias_min, row_c))
 
         elegido_c = None
@@ -1170,8 +1375,11 @@ def _conciliacion_automatica(banco_ext: pd.DataFrame, conta_ext: pd.DataFrame, m
                 elegido_c = c_idx
             elif dias_min is None or es_banco_nacion or abs(suma_b) >= 1000:
                 f_c = row_c.get('Fecha')
-                if pd.notna(f_c) and fechas_b:
-                    if any(f_c.year == fb.year and f_c.month == fb.month for fb in fechas_b):
+                f_c_dt = pd.to_datetime(f_c, dayfirst=True, errors='coerce')
+                fechas_b_dt = [pd.to_datetime(fb, dayfirst=True, errors='coerce') for fb in fechas_b]
+                fechas_b_dt = [fb for fb in fechas_b_dt if pd.notna(fb)]
+                if pd.notna(f_c_dt) and fechas_b_dt:
+                    if any(f_c_dt.year == fb.year and f_c_dt.month == fb.month for fb in fechas_b_dt):
                         elegido_c = c_idx
                 else:
                     elegido_c = c_idx

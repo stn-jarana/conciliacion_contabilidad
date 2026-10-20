@@ -265,6 +265,17 @@ def _extraer_datos_directos_pymupdf(ruta_pdf: Path) -> dict | None:
                 saldo_actual = s_ant
                 continue
 
+            # Filtrar filas de resumen: TOTAL CARGOS/ABONOS y líneas puramente numéricas
+            # Ejemplos que aparecen al final del PDF del BN:
+            #   cod = "TOTAL", "TOTAL CARGOS", "TOTAL ABONOS"
+            #   cod = "403" (número total de operaciones del resumen)
+            cod_upper = cod.upper()
+            if "TOTAL" in cod_upper:
+                continue
+            # Descartar si el código es solo dígitos (p.ej. "403" = nro de operaciones)
+            if re.fullmatch(r'\d+', cod):
+                continue
+
             # Movimiento normal
             cargos_val = abs(_parse_monto(row.iloc[idx_cargos]))
             abonos_val = abs(_parse_monto(row.iloc[idx_abonos]))
@@ -475,6 +486,22 @@ def leer_pdf_bn(ruta_pdf: Path | str) -> dict:
     df["sucursal"] = ""
     df["hora"] = ""
     df["usuario"] = ""
+
+    # ── Eliminar filas de resumen final (TOTAL, filas numéricas puras sin fecha) ──
+    # Estas filas aparecen al final del PDF y no son movimientos reales:
+    #   - Descripción: "TOTAL", "TOTAL CARGOS", "TOTAL ABONOS"
+    #   - Descripción: solo dígitos (p.ej. "403" = número total de operaciones)
+    #   - Sin fecha válida (NaT) y monto 0
+    desc_upper = df["descripcion"].astype(str).str.upper().str.strip()
+    mask_resumen = (
+        desc_upper.str.contains(r'^TOTAL', regex=True) |
+        desc_upper.str.fullmatch(r'\d+', na=False) |
+        (df["fecha"].isna() & (df["monto"] == 0.0))
+    )
+    if mask_resumen.any():
+        n_filtradas = mask_resumen.sum()
+        print(f"  [INFO] Descartadas {n_filtradas} fila(s) de resumen/totales del PDF.")
+        df = df[~mask_resumen].copy()
 
     # Ordenar por fecha cronológica manteniendo estabilidad
     df = df.sort_values("fecha", kind="mergesort").reset_index(drop=True)

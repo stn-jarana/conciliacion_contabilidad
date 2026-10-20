@@ -804,22 +804,6 @@ def flujo_reporte_inicial(config: dict) -> None:
         conta[col] = conta[col].fillna('').astype(str).str.strip()
 
     # ── Filtrar movimientos de otros bancos si aparecen en Giro ───────
-    # Si la contabilidad incluye explícitamente otros bancos en la columna Giro,
-    # se omiten para evitar cruces indebidos, conservando siempre a proveedores/terceros.
-    try:
-        from bancos import BANCOS, _contiene_alias, clave_banco
-        clave_act = clave_banco(banco_nombre)
-        otros_bancos = [cb for cb in BANCOS if cb != clave_act]
-        mascara_otro_banco = conta['giro'].map(
-            lambda val: any(_contiene_alias(val, ob) for ob in otros_bancos)
-        )
-        if mascara_otro_banco.any():
-            descartados = int(mascara_otro_banco.sum())
-            conta = conta[~mascara_otro_banco].reset_index(drop=True)
-            print(f"  [INFO] Se omitieron {descartados} registro(s) de otros bancos en la columna 'Giro'.")
-    except Exception:
-        pass
-
     # ── Filtrar registros de meses anteriores ("Información anterior") ─────
     # El mes de referencia lo determinamos a partir del banco ya sanitizado.
     # Solo se conservan registros cuya fecha_mov pertenezca al mismo mes y año.

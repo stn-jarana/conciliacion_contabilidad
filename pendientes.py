@@ -410,31 +410,45 @@ def cargar_pendientes(
         df_conta['_pendiente'] = True
 
     # ── Filtrar por mes de referencia ─────────────────────────────────
-    # Si se proporcionó mes_ref y anio_ref, se excluyen los movimientos cuya
-    # fecha corresponde al período actual (ya están en el extracto bancario y
-    # podrían duplicarse). Solo se cargan los de meses ANTERIORES.
+    # Solo se cargan pendientes de meses ANTERIORES al período actual.
+    # Se excluyen:
+    #   - Movimientos del mes actual (ya están en el extracto, se duplicarían).
+    #   - Movimientos de meses POSTERIORES al mes actual (no corresponden a
+    #     una conciliación anterior; ej. pendientes de marzo no se cargan
+    #     en la conciliación de febrero).
     if mes_ref is not None and anio_ref is not None:
+        from datetime import date as _date
+        fecha_ref = _date(anio_ref, mes_ref, 1)
+
         if not df_banco.empty:
             fechas_b = pd.to_datetime(df_banco['fecha'], errors='coerce')
-            mask_mes_actual_b = (
-                (fechas_b.dt.month == mes_ref) & (fechas_b.dt.year == anio_ref)
+            # Excluir el mes actual Y cualquier mes posterior
+            mask_excluir_b = fechas_b.apply(
+                lambda f: (
+                    pd.notna(f) and
+                    _date(f.year, f.month, 1) >= fecha_ref
+                )
             )
-            omitidos_b = mask_mes_actual_b.sum()
-            df_banco = df_banco[~mask_mes_actual_b].copy()
+            omitidos_b = int(mask_excluir_b.sum())
+            df_banco = df_banco[~mask_excluir_b].copy()
             if omitidos_b > 0:
                 print(f"  [INFO] Se omitieron {omitidos_b} pendiente(s) de banco del mes actual "
-                      f"({mes_ref:02d}/{anio_ref}) para evitar duplicados.")
+                      f"o posterior ({mes_ref:02d}/{anio_ref}) para evitar duplicados.")
 
         if not df_conta.empty:
             fechas_c = pd.to_datetime(df_conta['fecha_mov'], errors='coerce')
-            mask_mes_actual_c = (
-                (fechas_c.dt.month == mes_ref) & (fechas_c.dt.year == anio_ref)
+            # Excluir el mes actual Y cualquier mes posterior
+            mask_excluir_c = fechas_c.apply(
+                lambda f: (
+                    pd.notna(f) and
+                    _date(f.year, f.month, 1) >= fecha_ref
+                )
             )
-            omitidos_c = mask_mes_actual_c.sum()
-            df_conta = df_conta[~mask_mes_actual_c].copy()
+            omitidos_c = int(mask_excluir_c.sum())
+            df_conta = df_conta[~mask_excluir_c].copy()
             if omitidos_c > 0:
                 print(f"  [INFO] Se omitieron {omitidos_c} pendiente(s) de contabilidad del mes actual "
-                      f"({mes_ref:02d}/{anio_ref}) para evitar duplicados.")
+                      f"o posterior ({mes_ref:02d}/{anio_ref}) para evitar duplicados.")
 
     n_banco = len(df_banco)
     n_conta = len(df_conta)
